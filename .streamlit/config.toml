@@ -1,0 +1,14 @@
+[theme]
+base="dark"
+primaryColor="#1ABC9C"
+backgroundColor="#0E1117"
+secondaryBackgroundColor="#111827"
+textColor="#E5E7EB"
+
+[server]
+headless = true
+enableCORS = false
+port = 8501
+
+[ui]
+hideTopBar = true
