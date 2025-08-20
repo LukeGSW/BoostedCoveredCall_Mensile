@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.env
+
+# Streamlit secrets (non committare la key)
+.streamlit/secrets.toml
+
+# VSCode / IDE
+.vscode/
+.idea/
