@@ -1,15 +1,18 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 *.egg-info/
 .venv/
+venv/
 .env
+.env.*
 
-# Streamlit secrets (non committare la key)
+# Streamlit
 .streamlit/secrets.toml
+.streamlit/*.bak
 
-# VSCode / IDE
-.vscode/
-.idea/
+# Cache / output vari
+**/.ipynb_checkpoints/
+**/.mypy_cache/
+**/.pytest_cache/
+**/.DS_Store
