@@ -115,7 +115,7 @@ def build_sidebar_params() -> Dict[str, Any]:
             "Boost % Capitale BTD (su cap. iniziale)",
             min_value=0.0,
             max_value=10.0,
-            value=2.5,
+            value=5.0,
             step=0.5,
             help="Quota fissa di boost per il BTD (espresso in % sul capitale iniziale).",
         ) / 100.0
