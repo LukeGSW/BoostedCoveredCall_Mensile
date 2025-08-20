@@ -54,15 +54,6 @@ if run:
             st.pyplot(fig)
 
 st.markdown(
-    """
-    <small>
-    **Nota**: imposta la tua chiave `EODHD_API_KEY` in `.streamlit/secrets.toml`.
-    Esempio:
 
-    ```toml
-    EODHD_API_KEY = "la-tua-api-key"
-    ```
-    </small>
-    """,
     unsafe_allow_html=True,
 )
