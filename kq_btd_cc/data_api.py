@@ -1,68 +1,81 @@
-"""Download e preparazione dati da EODHD.
-- Ricostruzione OHLC aggiustati usando `adjusted_close` come baseline.
-- Compatibile con azioni e crypto (es. BTC-USD.CC).
-"""
+# kq_btd_cc/data_api.py
 from __future__ import annotations
 
-from datetime import date, timedelta
-from typing import Optional
-
 import os
-import requests
-import pandas as pd
+from typing import Optional
 import numpy as np
-
-try:
-    import streamlit as st  # per secrets in ambiente Streamlit
-except Exception:  # pragma: no cover
-    st = None
+import pandas as pd
+import requests
 
 
-EODHD_BASE_URL = "https://eodhd.com/api/eod/"
+def _get_api_key() -> Optional[str]:
+    """
+    Ordine di ricerca:
+    1) st.secrets["EODHD_API_KEY"]
+    2) os.environ["EODHD_API_KEY"]
+    3) (solo per sviluppo locale) .streamlit/secrets.toml o secrets.toml
+    """
+    # 1) Streamlit secrets (top-level o nidificato)
+    try:
+        import streamlit as st
+        if "EODHD_API_KEY" in st.secrets:
+            return st.secrets["EODHD_API_KEY"]
+        # supporto opzionale per formati nidificati:
+        for sec in ("eodhd", "EODHD", "EOD"):
+            if sec in st.secrets and isinstance(st.secrets[sec], dict):
+                d = st.secrets[sec]
+                if "api_key" in d:
+                    return d["api_key"]
+                if "API_KEY" in d:
+                    return d["API_KEY"]
+    except Exception:
+        pass
 
+    # 2) Variabile d'ambiente
+    key = os.getenv("EODHD_API_KEY")
+    if key:
+        return key
 
-def _get_api_key(explicit: Optional[str] = None) -> Optional[str]:
-    if explicit:
-        return explicit
-    # Streamlit secrets
-    if st is not None:
+    # 3) File TOML locale (non usato su Streamlit Cloud, utile in locale)
+    for path in (".streamlit/secrets.toml", "secrets.toml"):
         try:
-            if "EODHD_API_KEY" in st.secrets:
-                return st.secrets["EODHD_API_KEY"]
+            import toml  # facoltativo; se non installato si passa oltre
+            data = toml.load(path)
+            if "EODHD_API_KEY" in data:
+                return data["EODHD_API_KEY"]
+            for sec in ("eodhd", "EODHD", "EOD"):
+                if sec in data and isinstance(data[sec], dict):
+                    d = data[sec]
+                    if "api_key" in d:
+                        return d["api_key"]
+                    if "API_KEY" in d:
+                        return d["API_KEY"]
         except Exception:
             pass
-    # env var
-    return os.getenv("EODHD_API_KEY")
+
+    return None
 
 
-def fetch_eodhd_ohlc(
-    ticker: str,
-    start_date: str,
-    end_date: Optional[str] = None,
-    period: str = "m",
-    api_key: Optional[str] = None,
-) -> pd.DataFrame:
-    """Scarica OHLCV da EODHD e ricostruisce gli OHLC **aggiustati**.
-
-    Args:
-        ticker: es. 'AAPL.US' o 'BTC-USD.CC'
-        start_date: 'YYYY-MM-DD'
-        end_date: 'YYYY-MM-DD' (default: ieri)
-        period: 'd','w','m' (qui usiamo 'w' e 'm')
-        api_key: override esplicito della chiave
-    Returns:
-        DataFrame indicizzato per data con colonne: Open, High, Low, Close, Volume
+def fetch_eodhd_ohlc(ticker: str, start_date: str, end_date: str, period: str = "m") -> pd.DataFrame:
     """
-    if end_date is None:
-        end_date = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    Scarica OHLCV da EODHD e ricostruisce Open/High/Low aggiustati usando adjusted_close/close.
+    period: 'm' mensile, 'w' settimanale.
+    Ritorna DataFrame con colonne: Open, High, Low, Close, Volume indicizzate per data.
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        # Proviamo a dare un messaggio chiaro dentro Streamlit, se disponibile
+        try:
+            import streamlit as st
+            st.error("API key EODHD mancante. Imposta `EODHD_API_KEY` nei Secrets dell'app Streamlit.")
+            st.info('Esempio secrets:  EODHD_API_KEY = "la-tua-api-key"')
+            st.stop()
+        except Exception:
+            raise RuntimeError("API key EODHD mancante. Imposta EODHD_API_KEY nei secrets o come variabile d'ambiente.")
 
-    key = _get_api_key(api_key)
-    if not key:
-        raise RuntimeError("EODHD_API_KEY mancante: inseriscila nei secrets o nelle env.")
-
-    url = f"{EODHD_BASE_URL}{ticker}"
+    url = f"https://eodhd.com/api/eod/{ticker}"
     params = {
-        "api_token": key,
+        "api_token": api_key,
         "from": start_date,
         "to": end_date,
         "period": period,
@@ -70,73 +83,73 @@ def fetch_eodhd_ohlc(
         "order": "a",
     }
 
-    r = requests.get(url, params=params, timeout=45)
-    r.raise_for_status()
-    data = r.json()
-    if not isinstance(data, list) or len(data) == 0:
-        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"]).astype({"Volume": "Int64"})
+    try:
+        r = requests.get(url, params=params, timeout=45)
+        r.raise_for_status()
+        js = r.json()
+    except Exception as e:
+        # Se fallisce il download, ritorna DF vuoto
+        return pd.DataFrame()
 
-    df = pd.DataFrame(data)
-    df["date"] = pd.to_datetime(df["date"])  # eodhd key name
+    if not js or not isinstance(js, list):
+        return pd.DataFrame()
+
+    df = pd.DataFrame(js)
+    if df.empty:
+        return pd.DataFrame()
+
+    # parsing e rinomina
+    if "date" not in df.columns:
+        return pd.DataFrame()
+    df["date"] = pd.to_datetime(df["date"])
     df.set_index("date", inplace=True)
-
-    # Rinominazioni
     rename = {
-        "open": "Open_Nominal_EODHD",
-        "high": "High_Nominal_EODHD",
-        "low": "Low_Nominal_EODHD",
+        "open": "Open_Nominal",
+        "high": "High_Nominal",
+        "low": "Low_Nominal",
+        "close": "Close_Nominal",
         "adjusted_close": "Close",
-        "close": "Close_Nominal_EODHD",
         "volume": "Volume",
     }
-    df = df.rename(columns=rename)
+    df.rename(columns=rename, inplace=True)
 
-    # Converti numerici
-    for col in [
-        "Open_Nominal_EODHD",
-        "High_Nominal_EODHD",
-        "Low_Nominal_EODHD",
-        "Close",
-        "Close_Nominal_EODHD",
-        "Volume",
-    ]:
+    # numerici
+    for col in ["Open_Nominal", "High_Nominal", "Low_Nominal", "Close_Nominal", "Close", "Volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    if "Volume" in df.columns:
-        df["Volume"] = df["Volume"].astype("Int64")
 
-    # Se manca adjusted_close, fallback al close nominale
+    # fallback Close se adjusted_close mancante
     if "Close" not in df.columns or not df["Close"].notna().any():
-        if "Close_Nominal_EODHD" in df.columns and df["Close_Nominal_EODHD"].notna().any():
-            df["Close"] = df["Close_Nominal_EODHD"]
+        if "Close_Nominal" in df.columns and df["Close_Nominal"].notna().any():
+            df["Close"] = df["Close_Nominal"]
         else:
-            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"]).astype({"Volume": "Int64"})
+            return pd.DataFrame()
 
-    # Calcolo fattore di aggiustamento
-    if (
-        "Close_Nominal_EODHD" in df.columns
-        and df["Close_Nominal_EODHD"].replace(0, np.nan).notna().any()
-    ):
-        factor = (df["Close"] / df["Close_Nominal_EODHD"].replace(0, np.nan)).ffill().bfill()
-        if "Open_Nominal_EODHD" in df.columns:
-            df["Open"] = df["Open_Nominal_EODHD"] * factor
-        if "High_Nominal_EODHD" in df.columns:
-            df["High"] = df["High_Nominal_EODHD"] * factor
-        if "Low_Nominal_EODHD" in df.columns:
-            df["Low"] = df["Low_Nominal_EODHD"] * factor
+    # ricostruzione OHLC aggiustati
+    if "Close_Nominal" in df.columns and df["Close_Nominal"].replace(0, np.nan).notna().any():
+        adj_factor = (df["Close"] / df["Close_Nominal"].replace(0, np.nan)).ffill().bfill()
+        df["Open"] = (df.get("Open_Nominal") * adj_factor).round(4)
+        if "High_Nominal" in df.columns:
+            df["High"] = (df["High_Nominal"] * adj_factor).round(4)
+        if "Low_Nominal" in df.columns:
+            df["Low"] = (df["Low_Nominal"] * adj_factor).round(4)
     else:
-        # fallback: usa valori nominali
-        if "Open_Nominal_EODHD" in df.columns:
-            df["Open"] = df["Open_Nominal_EODHD"]
-        if "High_Nominal_EODHD" in df.columns:
-            df["High"] = df["High_Nominal_EODHD"]
-        if "Low_Nominal_EODHD" in df.columns:
-            df["Low"] = df["Low_Nominal_EODHD"]
+        # se non possibile, usa nominali dove presenti
+        if "Open_Nominal" in df.columns:
+            df["Open"] = df["Open_Nominal"]
+        if "High_Nominal" in df.columns:
+            df["High"] = df["High_Nominal"]
+        if "Low_Nominal" in df.columns:
+            df["Low"] = df["Low_Nominal"]
 
-    for c in ["Open", "High", "Low", "Close"]:
+    # colonne finali
+    for c in ["Open", "High", "Low", "Close", "Volume"]:
         if c not in df.columns:
             df[c] = np.nan
-        df[c] = df[c].round(6)
 
     out = df[["Open", "High", "Low", "Close", "Volume"]].sort_index().ffill().bfill()
+    # rimuovi righe completamente vuote eventualmente rimaste
+    if out[["Open", "Close"]].isna().any().any():
+        return pd.DataFrame()
+
     return out
