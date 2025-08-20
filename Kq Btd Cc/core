@@ -1,0 +1,129 @@
+# kq_btd_cc/core.py
+from __future__ import annotations
+import typing as _t
+import datetime as _dt
+import pandas as _pd
+import numpy as _np
+import matplotlib.pyplot as _plt
+
+# NOTA: la app imposta questa variabile prima di chiamare la funzione
+EODHD_API_KEY: str | None = None
+
+# --- Import dei moduli locali (portati dal notebook) ---
+from .data_api import _download_and_prepare_eodhd_data
+from .utils import (
+    AnsiColors as _AC,
+    format_currency as _format_currency,
+    format_percent as _format_percent,
+    currency_formatter as _currency_formatter,
+    percentage_formatter as _percentage_formatter,
+    add_watermark as _add_watermark,
+    setup_common_axis_elements as _setup_common_axis_elements,
+    setup_date_axis as _setup_date_axis,
+    check_plot_data as _check_plot_data,
+    compute_drawdown_monetary as _compute_drawdown_monetary,
+)
+from .style import STYLE_CONFIG as _STYLE
+
+
+class _PortingIncomplete(RuntimeError):
+    pass
+
+
+def esegui_analisi_completa(
+    params_gui: dict,
+    plot_prefs: dict,
+    export_enabled: bool = False,
+    export_base_path: str = "kriterion_export_output",
+    export_plot_format: str = "png",
+    export_table_format: str = "html",
+    export_html_report: bool = False,
+    html_report_filename: str = "Kriterion_Report_Completo.html",
+    num_columns_html_report: int = 2,
+    *,
+    # estensione per Streamlit: non chiudere le figure e ritornarle
+    streamlit_mode: bool = True,
+) -> dict:
+    """
+    Porta della funzione principale dal notebook.
+    Questa versione:
+      - mantiene la stessa firma pubblica,
+      - scarica i dati EODHD (mensili + settimanali per il filtro BTD),
+      - prepara la struttura di output attesa dalla dashboard,
+      - **NON** include ancora la logica completa di simulazione (BTD + covered call) perché
+        il file allegato contiene porzioni ellise ("...") e quindi non consente un porting 1:1.
+
+    Appena riceviamo la versione **completa** del notebook/script (senza ellissi), sostituiremo
+    questo corpo con l'implementazione identica e restituiremo anche le figure calcolate.
+    """
+    if not isinstance(params_gui, dict) or not isinstance(plot_prefs, dict):
+        raise ValueError("params_gui e plot_prefs devono essere dizionari.")
+    if not EODHD_API_KEY:
+        raise RuntimeError("EODHD_API_KEY non impostata. L'app la passa via st.secrets prima della chiamata.")
+
+    # --- Parametri principali (default come nel notebook) ---
+    ticker = params_gui.get("EODHD_TICKER", "BTC-USD.CC")
+    start_date = params_gui.get("START_DATE", "2015-01-01")
+    end_override = params_gui.get("END_DATE_OVERRIDE")
+    options_premium_pct = float(params_gui.get("OPTIONS_PREMIUM_PERCENT", 0.05))
+    initial_capital = float(params_gui.get("INITIAL_CAPITAL", 25000))
+    additional_capital = float(params_gui.get("ADDITIONAL_CAPITAL", 0))
+    capital_boost_pct = float(params_gui.get("CAPITAL_BOOST_PERCENT", 0.025))
+    var_conf_level = float(params_gui.get("VAR_CONFIDENCE_LEVEL", 0.99))
+    btd_dd_limit = float(params_gui.get("BUY_THE_DIP_DRAWDOWN_LIMIT_PERCENT", -0.90))  # es. -0.90
+
+    if end_override:
+        end_date = _pd.to_datetime(end_override).strftime("%Y-%m-%d")
+    else:
+        end_date = (_dt.date.today() - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # --- Watermark coerente con il notebook ---
+    watermark = f"Studio by Luca De Cesare - {_dt.date.today():%Y-%m-%d} - Ticker: {ticker}"
+
+    # --- Download dati EODHD ---
+    # Mensile (per segnali e simulazione)
+    mdf = _download_and_prepare_eodhd_data(ticker, start_date, end_date, time_period="m", api_key=EODHD_API_KEY)
+    # Settimanale (per filtro BTD su drawdown asset)
+    wdf = _download_and_prepare_eodhd_data(ticker, start_date, end_date, time_period="w", api_key=EODHD_API_KEY)
+
+    if mdf is None or mdf.empty:
+        raise _PortingIncomplete("Dati mensili assenti; impossibile procedere alla simulazione.")
+
+    # --- Pre-elaborazioni come nel notebook ---
+    spy_monthly = mdf.copy()
+    spy_monthly.rename(columns={"close": "Close", "open": "Open", "high": "High", "low": "Low", "volume": "Volume"}, inplace=True)
+    spy_monthly = spy_monthly.sort_index()
+    spy_monthly["Monthly_Return"] = spy_monthly["Close"].pct_change()
+    spy_monthly["Drawdown_Signal"] = (spy_monthly["Monthly_Return"] < 0).shift(1).fillna(False).astype(bool)
+
+    spy_weekly = None
+    weekly_dd_ok = False
+    if wdf is not None and not wdf.empty and "close" in wdf.columns:
+        spy_weekly = wdf.rename(columns={"close": "Close"}).sort_index()
+        # DD settimanale dell'asset come nel notebook
+        spy_weekly["Cumulative_Max"] = spy_weekly["Close"].cummax()
+        dd_asset = (spy_weekly["Close"] - spy_weekly["Cumulative_Max"]) / spy_weekly["Cumulative_Max"].replace(0, _np.nan)
+        spy_weekly["Drawdown_Asset"] = dd_asset.replace([_np.inf, -_np.inf], _np.nan).fillna(0.0)
+        weekly_dd_ok = True
+
+    # --- PLACEHOLDER simulazione ---
+    # Qui dovrebbe entrare la logica completa (BTD + covered call) del notebook.
+    # Poiché il file allegato presenta diverse sezioni troncate con "...",
+    # evitaremo di introdurre discrepanze implementando una versione parziale.
+
+    raise _PortingIncomplete(
+        "Per replicare **identicamente** la logica, ho bisogno della versione completa del notebook/script "
+        "(senza sezioni ellise '...'). Appena disponibile, sostituisco questo placeholder con il porting 1:1 e "
+        "restituisco la lista di figure in `results['figures']` insieme alle tre tabelle di simulazione."
+    )
+
+    # --- Struttura di ritorno (quando la simulazione sarà portata) ---
+    # results = {
+    #     "df_simulazione_np_export": df_np,      # DataFrame con colonne: EquityValue_Strategy, CumulativeInvested_Strategy, ...
+    #     "df_simulazione_cash_export": df_cash,
+    #     "df_simulazione_reinv_export": df_reinv,
+    #     "params_simulazione": params_gui,
+    #     "path_report_html": None,
+    #     "figures": figs,  # lista di matplotlib.figure.Figure nell'ordine Grafico 1 → A → B → C → 5 → 6 → 7 → extra
+    # }
+    # return results
