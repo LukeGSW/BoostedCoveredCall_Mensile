@@ -1,129 +1,604 @@
 # kq_btd_cc/core.py
 from __future__ import annotations
-import typing as _t
 import datetime as _dt
-import pandas as _pd
-import numpy as _np
-import matplotlib.pyplot as _plt
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
 
-# NOTA: la app imposta questa variabile prima di chiamare la funzione
-EODHD_API_KEY: str | None = None
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
-# --- Import dei moduli locali (portati dal notebook) ---
-from .data_api import _download_and_prepare_eodhd_data
+from .style import STYLE_CONFIG
 from .utils import (
-    AnsiColors as _AC,
-    format_currency as _format_currency,
-    format_percent as _format_percent,
-    currency_formatter as _currency_formatter,
-    percentage_formatter as _percentage_formatter,
-    add_watermark as _add_watermark,
-    setup_common_axis_elements as _setup_common_axis_elements,
-    setup_date_axis as _setup_date_axis,
-    check_plot_data as _check_plot_data,
-    compute_drawdown_monetary as _compute_drawdown_monetary,
+    AnsiColors as AC,
+    colorize,
+    strip_ansi,
+    format_currency,
+    format_percent,
+    add_watermark,
+    setup_common_axis_elements,
+    setup_date_axis,
+    currency_formatter,
+    percentage_formatter,
+    check_plot_data,
+    compute_drawdown_monetary,
 )
-from .style import STYLE_CONFIG as _STYLE
+from .data_api import download_and_prepare_eodhd_data, get_eodhd_api_key
 
 
-class _PortingIncomplete(RuntimeError):
-    pass
+@dataclass
+class Params:
+    EODHD_TICKER: str = "BTC-USD.CC"
+    START_DATE: str = "2015-01-01"
+    OPTIONS_PREMIUM_PERCENT: float = 0.05
+    INITIAL_CAPITAL: float = 25_000.0
+    ADDITIONAL_CAPITAL: float = 0.0
+    CAPITAL_BOOST_PERCENT: float = 0.025
+    VAR_CONFIDENCE_LEVEL: float = 0.99
+    BUY_THE_DIP_DRAWDOWN_LIMIT_PERCENT: float = -0.90
+    END_DATE_OVERRIDE: str | None = None
 
+
+# ---------------------------------------------------------------------------
+# Helper interni per metrica e tabelle (stessa logica del notebook)
+# ---------------------------------------------------------------------------
+
+def _build_monthly_pnl(equity: pd.Series) -> pd.Series:
+    if not check_plot_data(equity) or len(equity) < 2:
+        return pd.Series(dtype=float)
+    return (equity - equity.shift(1)).iloc[1:]
+
+
+def _calculate_annual_performance_metrics(
+    year: int,
+    start_equity_value_abs: float,
+    end_equity_value_abs: float,
+    total_btd_investment_for_year: float,
+    total_premiums_collected_for_year: float,
+    num_btd_events_for_year: int,
+    monthly_equity_points_for_year: List[float],
+    total_annual_capital_base: float,
+) -> dict:
+    capital_base_for_year = total_annual_capital_base
+    capital_invested_btd_this_year = total_btd_investment_for_year
+    capital_operative = capital_base_for_year + capital_invested_btd_this_year
+
+    operative_gain = end_equity_value_abs - start_equity_value_abs - total_btd_investment_for_year
+    operative_return = np.nan
+    if capital_operative > 1e-9:
+        operative_return = operative_gain / capital_operative
+    elif abs(operative_gain) < 1e-12:
+        operative_return = 0.0
+    else:
+        operative_return = np.inf if operative_gain > 0 else -np.inf
+
+    max_dd_intra_year = 0.0
+    if monthly_equity_points_for_year and len(monthly_equity_points_for_year) > 1:
+        s = pd.Series(monthly_equity_points_for_year).dropna()
+        if not s.empty:
+            dd = compute_drawdown_monetary(s)
+            max_dd_intra_year = float(dd.min()) if not dd.empty else 0.0
+            max_dd_intra_year = min(0.0, max_dd_intra_year)
+
+    return {
+        "Anno": year,
+        "Cap. Iniziale+Acc": capital_base_for_year,
+        "Cap. Investito BTD+Boost": capital_invested_btd_this_year,
+        "Cap. Operativo": capital_operative,
+        "Valore Finale Anno": end_equity_value_abs,
+        "Guadagno Operativo": operative_gain,
+        "Rendimento Operativo": operative_return,
+        "Premi Incassati Anno": total_premiums_collected_for_year,
+        "Num. Eventi BTD": num_btd_events_for_year,
+        "Max DD Intra-Anno ($ Monthly)": max_dd_intra_year,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Core: esegui_analisi_completa
+#   - Calcolo identico del ciclo BTD + Covered Call
+#   - Nessuna scrittura CSV; restituisce la lista delle figure
+# ---------------------------------------------------------------------------
 
 def esegui_analisi_completa(
-    params_gui: dict,
-    plot_prefs: dict,
-    export_enabled: bool = False,
-    export_base_path: str = "kriterion_export_output",
-    export_plot_format: str = "png",
-    export_table_format: str = "html",
-    export_html_report: bool = False,
-    html_report_filename: str = "Kriterion_Report_Completo.html",
-    num_columns_html_report: int = 2,
-    *,
-    # estensione per Streamlit: non chiudere le figure e ritornarle
-    streamlit_mode: bool = True,
-) -> dict:
-    """
-    Porta della funzione principale dal notebook.
-    Questa versione:
-      - mantiene la stessa firma pubblica,
-      - scarica i dati EODHD (mensili + settimanali per il filtro BTD),
-      - prepara la struttura di output attesa dalla dashboard,
-      - **NON** include ancora la logica completa di simulazione (BTD + covered call) perché
-        il file allegato contiene porzioni ellise ("...") e quindi non consente un porting 1:1.
+    params_gui: Dict,
+    plot_prefs: Dict,
+) -> List[plt.Figure]:
+    p = Params(**{**Params().__dict__, **params_gui})  # merge defaults + GUI
 
-    Appena riceviamo la versione **completa** del notebook/script (senza ellissi), sostituiremo
-    questo corpo con l'implementazione identica e restituiremo anche le figure calcolate.
-    """
-    if not isinstance(params_gui, dict) or not isinstance(plot_prefs, dict):
-        raise ValueError("params_gui e plot_prefs devono essere dizionari.")
-    if not EODHD_API_KEY:
-        raise RuntimeError("EODHD_API_KEY non impostata. L'app la passa via st.secrets prima della chiamata.")
+    # Date di lavoro
+    today = _dt.date.today()
+    current_run_date = today.strftime("%Y-%m-%d")
+    end_date = p.END_DATE_OVERRIDE or (today - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+    WATERMARK_TEXT = f"Studio by Luca De Cesare - {current_run_date} - Ticker: {p.EODHD_TICKER}"
 
-    # --- Parametri principali (default come nel notebook) ---
-    ticker = params_gui.get("EODHD_TICKER", "BTC-USD.CC")
-    start_date = params_gui.get("START_DATE", "2015-01-01")
-    end_override = params_gui.get("END_DATE_OVERRIDE")
-    options_premium_pct = float(params_gui.get("OPTIONS_PREMIUM_PERCENT", 0.05))
-    initial_capital = float(params_gui.get("INITIAL_CAPITAL", 25000))
-    additional_capital = float(params_gui.get("ADDITIONAL_CAPITAL", 0))
-    capital_boost_pct = float(params_gui.get("CAPITAL_BOOST_PERCENT", 0.025))
-    var_conf_level = float(params_gui.get("VAR_CONFIDENCE_LEVEL", 0.99))
-    btd_dd_limit = float(params_gui.get("BUY_THE_DIP_DRAWDOWN_LIMIT_PERCENT", -0.90))  # es. -0.90
-
-    if end_override:
-        end_date = _pd.to_datetime(end_override).strftime("%Y-%m-%d")
-    else:
-        end_date = (_dt.date.today() - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
-
-    # --- Watermark coerente con il notebook ---
-    watermark = f"Studio by Luca De Cesare - {_dt.date.today():%Y-%m-%d} - Ticker: {ticker}"
-
-    # --- Download dati EODHD ---
-    # Mensile (per segnali e simulazione)
-    mdf = _download_and_prepare_eodhd_data(ticker, start_date, end_date, time_period="m", api_key=EODHD_API_KEY)
-    # Settimanale (per filtro BTD su drawdown asset)
-    wdf = _download_and_prepare_eodhd_data(ticker, start_date, end_date, time_period="w", api_key=EODHD_API_KEY)
-
-    if mdf is None or mdf.empty:
-        raise _PortingIncomplete("Dati mensili assenti; impossibile procedere alla simulazione.")
-
-    # --- Pre-elaborazioni come nel notebook ---
-    spy_monthly = mdf.copy()
-    spy_monthly.rename(columns={"close": "Close", "open": "Open", "high": "High", "low": "Low", "volume": "Volume"}, inplace=True)
-    spy_monthly = spy_monthly.sort_index()
-    spy_monthly["Monthly_Return"] = spy_monthly["Close"].pct_change()
-    spy_monthly["Drawdown_Signal"] = (spy_monthly["Monthly_Return"] < 0).shift(1).fillna(False).astype(bool)
-
-    spy_weekly = None
-    weekly_dd_ok = False
-    if wdf is not None and not wdf.empty and "close" in wdf.columns:
-        spy_weekly = wdf.rename(columns={"close": "Close"}).sort_index()
-        # DD settimanale dell'asset come nel notebook
-        spy_weekly["Cumulative_Max"] = spy_weekly["Close"].cummax()
-        dd_asset = (spy_weekly["Close"] - spy_weekly["Cumulative_Max"]) / spy_weekly["Cumulative_Max"].replace(0, _np.nan)
-        spy_weekly["Drawdown_Asset"] = dd_asset.replace([_np.inf, -_np.inf], _np.nan).fillna(0.0)
-        weekly_dd_ok = True
-
-    # --- PLACEHOLDER simulazione ---
-    # Qui dovrebbe entrare la logica completa (BTD + covered call) del notebook.
-    # Poiché il file allegato presenta diverse sezioni troncate con "...",
-    # evitaremo di introdurre discrepanze implementando una versione parziale.
-
-    raise _PortingIncomplete(
-        "Per replicare **identicamente** la logica, ho bisogno della versione completa del notebook/script "
-        "(senza sezioni ellise '...'). Appena disponibile, sostituisco questo placeholder con il porting 1:1 e "
-        "restituisco la lista di figure in `results['figures']` insieme alle tre tabelle di simulazione."
+    print(
+        f"\n{AC.BOLD}{AC.BLUE}===== INIZIO ESECUZIONE ANALISI COMPLETA (Streamlit) ====={AC.RESET}"
+    )
+    print(
+        f"Parametri: Ticker={p.EODHD_TICKER}, Periodo={p.START_DATE} -> {end_date}, Cap. Iniziale=${p.INITIAL_CAPITAL:,.0f}"
     )
 
-    # --- Struttura di ritorno (quando la simulazione sarà portata) ---
-    # results = {
-    #     "df_simulazione_np_export": df_np,      # DataFrame con colonne: EquityValue_Strategy, CumulativeInvested_Strategy, ...
-    #     "df_simulazione_cash_export": df_cash,
-    #     "df_simulazione_reinv_export": df_reinv,
-    #     "params_simulazione": params_gui,
-    #     "path_report_html": None,
-    #     "figures": figs,  # lista di matplotlib.figure.Figure nell'ordine Grafico 1 → A → B → C → 5 → 6 → 7 → extra
-    # }
-    # return results
+    # -------------------------------------------------------------------
+    # 1) Download dati (mensile + settimanale) da EODHD
+    # -------------------------------------------------------------------
+    monthly = download_and_prepare_eodhd_data(
+        p.EODHD_TICKER, p.START_DATE, end_date, "m"
+    )
+    if monthly.empty or len(monthly) < 2:
+        print(f"{AC.RED}ERRORE CRITICO: Dati mensili insufficienti.{AC.RESET}")
+        return []
+
+    weekly = download_and_prepare_eodhd_data(
+        p.EODHD_TICKER, p.START_DATE, end_date, "w"
+    )
+    weekly_ok = False
+    if not weekly.empty and "Close" in weekly.columns and check_plot_data(weekly["Close"]):
+        weekly["Cumulative_Max"] = weekly["Close"].cummax()
+        dd_asset = (weekly["Close"] - weekly["Cumulative_Max"]) / weekly["Cumulative_Max"].replace(0, np.nan)
+        weekly["Drawdown_Asset"] = dd_asset.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        weekly_ok = True
+        print("Calcolo Drawdown Settimanale Asset completato.")
+    else:
+        print(f"{AC.YELLOW}Dati settimanali non validi: filtro BTD disabilitato.{AC.RESET}")
+        weekly = None
+
+    # Segnali di drawdown mensili
+    monthly["Monthly_Return"] = monthly["Close"].pct_change()
+    monthly["Drawdown_Signal"] = (monthly["Monthly_Return"] < 0).shift(1).fillna(False).astype(bool)
+
+    # -------------------------------------------------------------------
+    # 2) Inizializzazione
+    # -------------------------------------------------------------------
+    TOTAL_ANNUAL_CAPITAL = p.INITIAL_CAPITAL + p.ADDITIONAL_CAPITAL
+    CAPITAL_BOOST_FIXED = p.INITIAL_CAPITAL * p.CAPITAL_BOOST_PERCENT
+
+    eq_no_prem = [TOTAL_ANNUAL_CAPITAL]
+    eq_prem_cash = [TOTAL_ANNUAL_CAPITAL]
+    eq_prem_reinv = [TOTAL_ANNUAL_CAPITAL]
+    sim_dates = [monthly.index[0]]
+
+    curr_cap_no_prem = TOTAL_ANNUAL_CAPITAL
+    curr_cap_prem_cash_quotes = TOTAL_ANNUAL_CAPITAL
+    accum_prem_cash_year = 0.0
+
+    gain_off_np = 0.0
+    gain_off_cash = 0.0
+    gain_off_reinv = 0.0
+
+    # quote iniziali
+    first_open_idx = monthly["Open"].first_valid_index()
+    if first_open_idx is None:
+        print(f"{AC.RED}Open iniziale non valido.{AC.RESET}")
+        return []
+    first_open = monthly.loc[first_open_idx, "Open"]
+    if not (pd.notna(first_open) and first_open > 0):
+        print(f"{AC.RED}Open iniziale non valido ({first_open}).{AC.RESET}")
+        return []
+
+    initial_main_shares_year = p.INITIAL_CAPITAL / first_open if p.INITIAL_CAPITAL > 0 else 0.0
+    shares_cash = TOTAL_ANNUAL_CAPITAL / first_open if TOTAL_ANNUAL_CAPITAL > 0 else 0.0
+    shares_reinv = shares_cash
+
+    # Annual tracking
+    annual_metrics_cash: List[dict] = []
+    annual_metrics_reinv: List[dict] = []
+
+    year_eq_np = [TOTAL_ANNUAL_CAPITAL]
+    year_eq_cash = [TOTAL_ANNUAL_CAPITAL]
+    year_eq_reinv = [TOTAL_ANNUAL_CAPITAL]
+    year_start_np = TOTAL_ANNUAL_CAPITAL
+    year_start_cash = TOTAL_ANNUAL_CAPITAL
+    year_start_reinv = TOTAL_ANNUAL_CAPITAL
+
+    total_btd_year = 0.0
+    n_btd_year = 0
+    total_prem_cash_year = 0.0
+    total_prem_reinv_year = 0.0
+
+    monthly_btd_list: List[float] = []
+
+    # capitale cumulativo versato (lordo)
+    total_external_np = TOTAL_ANNUAL_CAPITAL
+    total_external_cash = TOTAL_ANNUAL_CAPITAL
+    total_external_reinv = TOTAL_ANNUAL_CAPITAL
+
+    cum_invested_np = [total_external_np]
+    cum_invested_cash = [total_external_cash]
+    cum_invested_reinv = [total_external_reinv]
+
+    # -------------------------------------------------------------------
+    # 3) Loop mensile
+    # -------------------------------------------------------------------
+    for i in range(1, len(monthly)):
+        prev = monthly.iloc[i - 1]
+        cur = monthly.iloc[i]
+        cur_date: pd.Timestamp = cur.name
+        cur_year = cur_date.year
+        prev_year = prev.name.year
+
+        # Reset annuale
+        if cur_year > prev_year:
+            # chiusura anno precedente
+            last_np = eq_no_prem[-1]
+            last_cash = eq_prem_cash[-1]
+            last_reinv = eq_prem_reinv[-1]
+
+            annual_metrics_cash.append(
+                _calculate_annual_performance_metrics(
+                    prev_year,
+                    year_start_cash,
+                    last_cash,
+                    total_btd_year,
+                    total_prem_cash_year,
+                    n_btd_year,
+                    year_eq_cash,
+                    TOTAL_ANNUAL_CAPITAL,
+                )
+            )
+            annual_metrics_reinv.append(
+                _calculate_annual_performance_metrics(
+                    prev_year,
+                    year_start_reinv,
+                    last_reinv,
+                    total_btd_year,
+                    total_prem_reinv_year,
+                    n_btd_year,
+                    year_eq_reinv,
+                    TOTAL_ANNUAL_CAPITAL,
+                )
+            )
+
+            # aggiorna offset per mantenere continuità equity assolute
+            gain_off_np += last_np - (TOTAL_ANNUAL_CAPITAL + gain_off_np)
+            gain_off_cash += last_cash - (TOTAL_ANNUAL_CAPITAL + gain_off_cash)
+            gain_off_reinv += last_reinv - (TOTAL_ANNUAL_CAPITAL + gain_off_reinv)
+
+            # reset quote/capitale per nuovo anno
+            open_reset = cur["Open"]
+            if not (pd.notna(open_reset) and open_reset > 0):
+                open_reset = prev["Close"]
+                if not (pd.notna(open_reset) and open_reset > 0):
+                    print(f"{AC.RED}Reset {cur_year}: prezzo non valido.{AC.RESET}")
+                    return []
+
+            initial_main_shares_year = p.INITIAL_CAPITAL / open_reset if p.INITIAL_CAPITAL > 0 else 0.0
+            shares_cash = TOTAL_ANNUAL_CAPITAL / open_reset if TOTAL_ANNUAL_CAPITAL > 0 else 0.0
+            shares_reinv = shares_cash
+
+            curr_cap_no_prem = TOTAL_ANNUAL_CAPITAL
+            curr_cap_prem_cash_quotes = TOTAL_ANNUAL_CAPITAL
+            accum_prem_cash_year = 0.0
+
+            year_start_np = TOTAL_ANNUAL_CAPITAL + gain_off_np
+            year_start_cash = TOTAL_ANNUAL_CAPITAL + gain_off_cash
+            year_start_reinv = TOTAL_ANNUAL_CAPITAL + gain_off_reinv
+            year_eq_np = [year_start_np]
+            year_eq_cash = [year_start_cash]
+            year_eq_reinv = [year_start_reinv]
+
+            total_btd_year = 0.0
+            n_btd_year = 0
+            total_prem_cash_year = 0.0
+            total_prem_reinv_year = 0.0
+
+            # nuovo versamento annuale lordo
+            total_external_np += TOTAL_ANNUAL_CAPITAL
+            total_external_cash += TOTAL_ANNUAL_CAPITAL
+            total_external_reinv += TOTAL_ANNUAL_CAPITAL
+
+        sim_dates.append(cur_date)
+
+        prev_close, cur_open, cur_close = prev["Close"], cur["Open"], cur["Close"]
+        eq_np_month = eq_no_prem[-1]
+        eq_cash_month = eq_prem_cash[-1]
+        eq_reinv_month = eq_prem_reinv[-1]
+
+        btd_invest_gross = 0.0
+
+        if not all(pd.notna(x) for x in [prev_close, cur_open, cur_close]):
+            print(f"{AC.YELLOW}Prezzi non validi per {cur_date.date()}. Equity invariata.{AC.RESET}")
+        else:
+            # Premio covered call sul pacchetto iniziale
+            premio_mese = (
+                initial_main_shares_year * cur_open * p.OPTIONS_PREMIUM_PERCENT
+                if initial_main_shares_year > 0 and cur_open > 0
+                else 0.0
+            )
+            total_prem_cash_year += premio_mese
+            total_prem_reinv_year += premio_mese
+
+            price_change = cur_close - prev_close
+
+            # Strategia No Premi (solo quote operative)
+            pnl_quotes_np = shares_cash * price_change
+            cap_np_before_btd = curr_cap_no_prem + pnl_quotes_np
+
+            # Trigger BTD se il mese precedente è stato negativo
+            apply_btd = False
+            if bool(monthly["Drawdown_Signal"].iloc[i]):
+                # filtro DD weekly
+                allow_btd = True
+                if weekly_ok and weekly is not None:
+                    try:
+                        latest_dd = weekly["Drawdown_Asset"].asof(cur_date)
+                        allow_btd = not (pd.notna(latest_dd) and latest_dd < p.BUY_THE_DIP_DRAWDOWN_LIMIT_PERCENT)
+                    except Exception:
+                        pass
+                if allow_btd:
+                    trig_ret = monthly["Monthly_Return"].iloc[i - 1]
+                    if pd.notna(trig_ret) and trig_ret < 0:
+                        add_inv = abs(trig_ret) * p.INITIAL_CAPITAL
+                        boost = CAPITAL_BOOST_FIXED
+                        potential = add_inv + boost
+                        remaining = max(0.0, p.INITIAL_CAPITAL - total_btd_year)
+                        btd_invest_gross = min(potential, remaining)
+                        if btd_invest_gross > 1e-9:
+                            apply_btd = True
+                            n_btd_year += 1
+                            total_btd_year += btd_invest_gross
+                            total_external_np += btd_invest_gross
+                            total_external_cash += btd_invest_gross
+                            total_external_reinv += btd_invest_gross
+
+            # Applica BTD (acquisto quote a fine mese su close)
+            shares_cash_new = shares_cash
+            shares_reinv_new = shares_reinv
+            if apply_btd:
+                cap_np_before_btd += btd_invest_gross
+                if cur_close > 0:
+                    added_shares = btd_invest_gross / cur_close
+                    shares_cash_new += added_shares
+                    shares_reinv_new += added_shares
+            monthly_btd_list.append(btd_invest_gross)
+
+            shares_cash = shares_cash_new
+            shares_reinv = shares_reinv_new
+
+            curr_cap_no_prem = cap_np_before_btd
+            eq_np_month = curr_cap_no_prem + gain_off_np
+
+            # Strategia Premi in Cash (quota iniziale cappata a strike=open)
+            val_base_cappato = (
+                initial_main_shares_year * (cur_open if cur_close >= cur_open else cur_close)
+                if initial_main_shares_year > 0
+                else 0.0
+            )
+            quote_extra = max(0.0, shares_cash - initial_main_shares_year)
+            val_extra = quote_extra * cur_close
+            curr_cap_prem_cash_quotes = val_base_cappato + val_extra
+            accum_prem_cash_year += premio_mese
+            eq_cash_month = curr_cap_prem_cash_quotes + accum_prem_cash_year + gain_off_cash
+
+            # Strategia Premi Reinvestiti
+            if premio_mese > 0 and cur_close > 0:
+                shares_reinv += premio_mese / cur_close
+            val_base_cappato_r = (
+                initial_main_shares_year * (cur_open if cur_close >= cur_open else cur_close)
+                if initial_main_shares_year > 0
+                else 0.0
+            )
+            quote_extra_r = max(0.0, shares_reinv - initial_main_shares_year)
+            val_extra_r = quote_extra_r * cur_close
+            val_tot_reinv = val_base_cappato_r + val_extra_r
+            eq_reinv_month = val_tot_reinv + gain_off_reinv
+
+        # append
+        eq_no_prem.append(eq_np_month)
+        eq_prem_cash.append(eq_cash_month)
+        eq_prem_reinv.append(eq_reinv_month)
+        year_eq_np.append(eq_np_month)
+        year_eq_cash.append(eq_cash_month)
+        year_eq_reinv.append(eq_reinv_month)
+
+        # cumulativo versato
+        cum_invested_np.append(total_external_np)
+        cum_invested_cash.append(total_external_cash)
+        cum_invested_reinv.append(total_external_reinv)
+
+    # chiusura ultimo anno
+    last_year = sim_dates[-1].year if sim_dates else monthly.index[-1].year
+    annual_metrics_cash.append(
+        _calculate_annual_performance_metrics(
+            last_year,
+            year_start_cash,
+            eq_prem_cash[-1],
+            total_btd_year,
+            total_prem_cash_year,
+            n_btd_year,
+            year_eq_cash,
+            TOTAL_ANNUAL_CAPITAL,
+        )
+    )
+    annual_metrics_reinv.append(
+        _calculate_annual_performance_metrics(
+            last_year,
+            year_start_reinv,
+            eq_prem_reinv[-1],
+            total_btd_year,
+            total_prem_reinv_year,
+            n_btd_year,
+            year_eq_reinv,
+            TOTAL_ANNUAL_CAPITAL,
+        )
+    )
+
+    # -------------------------------------------------------------------
+    # 4) Serie finali per plot
+    # -------------------------------------------------------------------
+    idx = pd.to_datetime(sim_dates)
+    s_np = pd.Series(eq_no_prem, index=idx, name="BTD No Premi").dropna()
+    s_cash = pd.Series(eq_prem_cash, index=idx, name="BTD+Premi(Cash)").dropna()
+    s_reinv = pd.Series(eq_prem_reinv, index=idx, name="BTD+Premi(Reinv)").dropna()
+
+    # Buy&Hold comparativo (normalizzato sul capitale totale annuo)
+    bh = pd.Series(dtype=float, name="Buy & Hold")
+    if not monthly.empty and "Close" in monthly.columns and monthly["Close"].notna().any() and TOTAL_ANNUAL_CAPITAL > 0:
+        first_idx = monthly["Close"].first_valid_index()
+        base = monthly.loc[first_idx, "Close"] if first_idx is not None else np.nan
+        if pd.notna(base) and base > 0:
+            norm = monthly["Close"] / base
+            bh = (norm * TOTAL_ANNUAL_CAPITAL).rename("Buy & Hold").loc[first_idx:]
+        else:
+            bh = pd.Series([TOTAL_ANNUAL_CAPITAL] * len(monthly), index=monthly.index, name="Buy & Hold")
+
+    dd_bh = compute_drawdown_monetary(bh)
+    dd_np = compute_drawdown_monetary(s_np)
+    dd_cash = compute_drawdown_monetary(s_cash)
+    dd_reinv = compute_drawdown_monetary(s_reinv)
+
+    # Serie BTD mensili (lordi)
+    btd_series = pd.Series(dtype=float)
+    if len(monthly_btd_list) == len(idx) - 1 and len(idx) > 1:
+        btd_series = pd.Series(monthly_btd_list, index=idx[1:])
+    elif len(monthly_btd_list) > 0 and len(idx) > 1:
+        n = min(len(monthly_btd_list), len(idx) - 1)
+        btd_series = pd.Series(monthly_btd_list[:n], index=idx[1 : n + 1])
+
+    # -------------------------------------------------------------------
+    # 5) Grafici
+    # -------------------------------------------------------------------
+    figs: List[plt.Figure] = []
+
+    # Grafico 1: Equity vs Capitale cumulativo (Cap. iniziale + BTD)
+    try:
+        cum_btd_for_plot = pd.Series(dtype=float)
+        if check_plot_data(btd_series) and check_plot_data(s_np):
+            target_index = s_np.index
+            cum_btd_for_plot = btd_series.cumsum().reindex(target_index, method="ffill").fillna(0) + TOTAL_ANNUAL_CAPITAL
+        if all(check_plot_data(x) for x in [s_np, s_cash, s_reinv, cum_btd_for_plot]):
+            fig1, ax1 = plt.subplots(figsize=STYLE_CONFIG["figure_figsize"], constrained_layout=True)
+            fig1.suptitle(
+                f"Equity Cumulativa vs Investimento BTD Cumulativo - {p.EODHD_TICKER.upper()}",
+                fontsize=STYLE_CONFIG["font_sizes"]["suptitle"],
+                weight="bold",
+            )
+            ax1.plot(s_np.index, s_np, color=STYLE_CONFIG["colors"]["equity_no_prem"], linewidth=STYLE_CONFIG["line_width"]["standard"], label="BTD No Premi")
+            ax1.plot(s_cash.index, s_cash, color=STYLE_CONFIG["colors"]["equity_prem_accum"], linestyle="--", linewidth=STYLE_CONFIG["line_width"]["standard"], label="BTD + Premi (Cash)")
+            ax1.plot(s_reinv.index, s_reinv, color=STYLE_CONFIG["colors"]["equity_prem_reinvest"], linewidth=STYLE_CONFIG["line_width"]["thick"], label="BTD + Premi (Reinvest)")
+            setup_common_axis_elements(ax1, title="", xlabel="Data", ylabel="Valore Portafoglio ($)", y_formatter=currency_formatter)
+            ax2 = ax1.twinx()
+            ax2.plot(cum_btd_for_plot.index, cum_btd_for_plot, linestyle=":", linewidth=STYLE_CONFIG["line_width"]["thin"], color=STYLE_CONFIG["colors"]["investment"], label="Cap. Iniziale + BTD Cumul.")
+            ax2.set_ylabel("Cap. Iniziale + BTD Cumul. ($)", color=STYLE_CONFIG["colors"]["investment"], fontsize=STYLE_CONFIG["font_sizes"]["axis_label"])
+            ax2.yaxis.set_major_formatter(FuncFormatter(currency_formatter))
+            ax2.tick_params(axis="y", labelcolor=STYLE_CONFIG["colors"]["investment"], labelsize=STYLE_CONFIG["font_sizes"]["tick_label"])
+            ax2.grid(False)
+            ax2.set_ylim(bottom=0)
+            setup_date_axis(ax1, major_locator_base=1, minor_locator_interval=3, minor_format="null")
+            lines1, labels1 = ax1.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=STYLE_CONFIG["font_sizes"]["legend"], frameon=True)
+            add_watermark(fig1, WATERMARK_TEXT)
+            figs.append(fig1)
+        else:
+            print(f"{AC.YELLOW}Dati insufficienti per Grafico 1.{AC.RESET}")
+    except Exception as e:
+        print(f"{AC.RED}Errore Grafico 1: {e}{AC.RESET}")
+
+    def _plot_eq_dd(equity: pd.Series, dd: pd.Series, label: str, color_eq: str, letter: str) -> None:
+        if not check_plot_data(equity):
+            print(f"{AC.YELLOW}Dati equity insufficienti per grafico {letter}.{AC.RESET}")
+            return
+        fig, (ax1, ax2) = plt.subplots(
+            nrows=2, ncols=1, figsize=STYLE_CONFIG["figure_figsize"], sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]}
+        )
+        fig.suptitle(
+            f"{strip_ansi(label)} - Equity e Drawdown Monetario Storico",
+            fontsize=STYLE_CONFIG["font_sizes"]["suptitle"],
+            weight="bold",
+        )
+        ax1.plot(equity.index, equity, label=f"Equity {strip_ansi(label)}", color=color_eq, linewidth=STYLE_CONFIG["line_width"]["standard"])
+        setup_common_axis_elements(ax1, title="", xlabel="", ylabel="Equity ($)", y_formatter=currency_formatter)
+        ax1.legend(loc="upper left", fontsize=STYLE_CONFIG["font_sizes"]["legend"], frameon=True)
+        if dd is not None and not dd.empty:
+            ax2.plot(dd.index, dd, label="Drawdown ($)", color=STYLE_CONFIG["colors"]["drawdown_portfolio_usd"], linewidth=STYLE_CONFIG["line_width"]["thin"])
+            ax2.fill_between(dd.index, dd, 0, where=(dd < 0), color=STYLE_CONFIG["colors"]["drawdown_portfolio_usd"], alpha=0.25)
+        else:
+            ax2.text(0.5, 0.5, "Nessun drawdown monetario significativo.", ha="center", va="center", transform=ax2.transAxes, fontsize=STYLE_CONFIG["font_sizes"]["annotation"] - 1, color="grey")
+        setup_common_axis_elements(ax2, title="", xlabel="Data", ylabel="Drawdown ($)", y_formatter=currency_formatter)
+        top = 0
+        if dd is not None and not dd.empty and dd.min() < 0:
+            top = abs(dd.min()) * 0.05
+        ax2.set_ylim(top=top)
+        setup_date_axis(ax2, major_locator_base=1, minor_locator_interval=3, minor_format="null")
+        add_watermark(fig, WATERMARK_TEXT)
+        figs.append(fig)
+
+    # Grafici A, B, C
+    try:
+        _plot_eq_dd(s_np, dd_np, "BTD No Premi", STYLE_CONFIG["colors"]["equity_no_prem"], "A")
+        _plot_eq_dd(s_cash, dd_cash, "BTD+Premi(Cash)", STYLE_CONFIG["colors"]["equity_prem_accum"], "B")
+        _plot_eq_dd(s_reinv, dd_reinv, "BTD+Premi(Reinv)", STYLE_CONFIG["colors"]["equity_prem_reinvest"], "C")
+    except Exception as e:
+        print(f"{AC.RED}Errore grafici A/B/C: {e}{AC.RESET}")
+
+    # Grafico 5: Reinvestimenti mensili BTD (bar)
+    try:
+        if check_plot_data(btd_series):
+            g5 = btd_series[btd_series > 1e-6].copy()
+            if not g5.empty:
+                fig5, ax5 = plt.subplots(figsize=STYLE_CONFIG["figure_figsize"], constrained_layout=True)
+                fig5.suptitle(
+                    f"Reinvestimenti Mensili (BTD + Boost) - {p.EODHD_TICKER.upper()}",
+                    fontsize=STYLE_CONFIG["font_sizes"]["suptitle"],
+                    weight="bold",
+                )
+                width = max(15, int(400 / len(g5.index)))
+                width = min(width, 25)
+                ax5.bar(g5.index, g5, width=width, color=STYLE_CONFIG["colors"]["reinvest"], label="Reinvestimento BTD Mensile")
+                setup_common_axis_elements(ax5, title="", xlabel="Data", ylabel="Importo Reinvestito ($)", y_formatter=currency_formatter)
+                setup_date_axis(ax5, major_locator_base=1, minor_locator_interval=3, minor_format="null")
+                ax5.legend(loc="upper right", frameon=True, fontsize=STYLE_CONFIG["font_sizes"]["legend"])
+                ax5.set_ylim(bottom=0)
+                add_watermark(fig5, WATERMARK_TEXT)
+                figs.append(fig5)
+    except Exception as e:
+        print(f"{AC.RED}Errore Grafico 5: {e}{AC.RESET}")
+
+    # Grafico 6: Drawdown settimanale asset vs limite
+    try:
+        if weekly_ok and weekly is not None and "Drawdown_Asset" in weekly.columns and check_plot_data(weekly["Drawdown_Asset"]):
+            dd_series = weekly["Drawdown_Asset"] * 100
+            fig6, ax6 = plt.subplots(figsize=STYLE_CONFIG["figure_figsize"], constrained_layout=True)
+            fig6.suptitle(
+                f"Drawdown Settimanale Asset {p.EODHD_TICKER.upper()} (%) vs Limite BTD",
+                fontsize=STYLE_CONFIG["font_sizes"]["suptitle"],
+                weight="bold",
+            )
+            ax6.plot(dd_series.index, dd_series, color=STYLE_CONFIG["colors"]["drawdown_asset"], linewidth=STYLE_CONFIG["line_width"]["thin"], label="Drawdown Asset (%)")
+            ax6.fill_between(dd_series.index, dd_series, 0, where=dd_series < 0, color=STYLE_CONFIG["colors"]["drawdown_asset"], alpha=0.3)
+            limit_pct = p.BUY_THE_DIP_DRAWDOWN_LIMIT_PERCENT * 100
+            ax6.axhline(limit_pct, color="black", linestyle=":", linewidth=1.5, label=f"Limite Attivazione BTD ({limit_pct:.0f}%)")
+            setup_common_axis_elements(ax6, title="", xlabel="Data", ylabel="Drawdown Asset (%)", y_formatter=percentage_formatter)
+            setup_date_axis(ax6, major_locator_base=1, minor_locator_interval=None)
+            ax6.legend(loc="lower left", frameon=True, fontsize=STYLE_CONFIG["font_sizes"]["legend"])
+            ax6.set_ylim(top=5)
+            add_watermark(fig6, WATERMARK_TEXT)
+            figs.append(fig6)
+    except Exception as e:
+        print(f"{AC.RED}Errore Grafico 6: {e}{AC.RESET}")
+
+    # Grafico 7: Confronto finale con B&H
+    try:
+        if all(check_plot_data(x) for x in [bh, s_np, s_cash, s_reinv]):
+            fig7, ax7 = plt.subplots(figsize=STYLE_CONFIG["figure_figsize"], constrained_layout=True)
+            fig7.suptitle(
+                f"Confronto Performance: B&H vs Strategie BTD - {p.EODHD_TICKER.upper()}",
+                fontsize=STYLE_CONFIG["font_sizes"]["suptitle"],
+                weight="bold",
+            )
+            ax7.plot(bh.index, bh, color=STYLE_CONFIG["colors"]["buy_hold"], linestyle="--", linewidth=STYLE_CONFIG["line_width"]["standard"], label=f"Buy & Hold ({format_currency(TOTAL_ANNUAL_CAPITAL)})")
+            ax7.plot(s_np.index, s_np, color=STYLE_CONFIG["colors"]["equity_no_prem"], linestyle="-", linewidth=STYLE_CONFIG["line_width"]["standard"], label="BTD No Premi")
+            ax7.plot(s_cash.index, s_cash, color=STYLE_CONFIG["colors"]["equity_prem_accum"], linestyle="-.", linewidth=STYLE_CONFIG["line_width"]["standard"], label="BTD+Premi(Cash)")
+            ax7.plot(s_reinv.index, s_reinv, color=STYLE_CONFIG["colors"]["equity_prem_reinvest"], linestyle="-", linewidth=STYLE_CONFIG["line_width"]["thick"], label="BTD+Premi(Reinv)")
+            setup_common_axis_elements(ax7, title="", xlabel="Data", ylabel="Valore Portafoglio ($)", y_formatter=currency_formatter)
+            setup_date_axis(ax7, major_locator_base=1, minor_locator_interval=3, minor_format="null")
+            ax7.legend(loc="upper left", frameon=True, fontsize=STYLE_CONFIG["font_sizes"]["legend"])
+            add_watermark(fig7, WATERMARK_TEXT)
+            figs.append(fig7)
+    except Exception as e:
+        print(f"{AC.RED}Errore Grafico 7: {e}{AC.RESET}")
+
+    print(f"\n{AC.BOLD}--- Analisi completata. Figure generate: {len(figs)} ---{AC.RESET}")
+    return figs
