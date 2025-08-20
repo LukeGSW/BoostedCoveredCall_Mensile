@@ -1,0 +1,172 @@
+# kq_btd_cc/data_api.py
+from __future__ import annotations
+import os
+from typing import Optional
+import pandas as pd
+import numpy as np
+import requests
+
+from .utils import AnsiColors as AC
+
+EODHD_BASE_URL = "https://eodhd.com/api/eod/"
+
+
+def get_eodhd_api_key(explicit_key: Optional[str] = None) -> str:
+    """Recupera la API key di EODHD.
+    Ordine: argomento esplicito > Streamlit secrets > variabile d'ambiente.
+    """
+    if explicit_key:
+        return explicit_key
+    # Prova da Streamlit secrets se disponibile
+    try:
+        import streamlit as st  # type: ignore
+        if "EODHD_API_KEY" in st.secrets:
+            return str(st.secrets["EODHD_API_KEY"])  # pragma: no cover
+    except Exception:
+        pass
+    # Fallback env
+    env_key = os.getenv("EODHD_API_KEY")
+    if env_key:
+        return env_key
+    raise RuntimeError(
+        f"{AC.RED}ERRORE CRITICO: API Key EODHD non trovata. Imposta 'EODHD_API_KEY' nei secrets o nelle variabili d'ambiente.{AC.RESET}"
+    )
+
+
+def download_and_prepare_eodhd_data(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    period: str,
+    api_key: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Scarica OHLCV da EODHD e ricostruisce OHLC *aggiustati* replicando la logica del notebook.
+
+    Args:
+        ticker: es. 'BTC-USD.CC' o 'AAPL.US'
+        start_date: 'YYYY-MM-DD'
+        end_date: 'YYYY-MM-DD'
+        period: 'm' (mensile) o 'w' (settimanale)
+        api_key: opzionale; se None viene ricavata da secrets/env
+    Returns:
+        DataFrame indicizzato per data con colonne: ['Open','High','Low','Close','Volume']
+    """
+    key = get_eodhd_api_key(api_key)
+    api_url = f"{EODHD_BASE_URL}{ticker}"
+    params = {
+        "api_token": key,
+        "from": start_date,
+        "to": end_date,
+        "period": period,
+        "fmt": "json",
+        "order": "a",  # ascendente
+    }
+
+    print(f"Tentativo di download dati EODHD (periodo: {period}) per {ticker} da {start_date} a {end_date}...")
+
+    try:
+        r = requests.get(api_url, params=params, timeout=45)
+        r.raise_for_status()
+        data = r.json()
+        if not data or not isinstance(data, list):
+            print(
+                f"  -> {AC.YELLOW}Nessun dato valido scaricato da EODHD per {ticker} (periodo {period}).{AC.RESET}"
+            )
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        if df.empty:
+            print(f"  -> {AC.YELLOW}DataFrame vuoto dopo conversione JSON per {ticker}.{AC.RESET}")
+            return pd.DataFrame()
+
+        df["date"] = pd.to_datetime(df["date"])  # type: ignore
+        df.set_index("date", inplace=True)
+
+        cols_map = {
+            "open": "Open_Nominal_EODHD",
+            "high": "High_Nominal_EODHD",
+            "low": "Low_Nominal_EODHD",
+            "adjusted_close": "Close",
+            "close": "Close_Nominal_EODHD",
+            "volume": "Volume",
+        }
+        df = df.rename(columns=cols_map)
+
+        to_numeric = [
+            "Open_Nominal_EODHD",
+            "High_Nominal_EODHD",
+            "Low_Nominal_EODHD",
+            "Close",
+            "Close_Nominal_EODHD",
+            "Volume",
+        ]
+        for c in to_numeric:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+                if c == "Volume":
+                    df[c] = df[c].astype("Int64")
+            elif c in ["Open_Nominal_EODHD", "Close_Nominal_EODHD", "Close"]:
+                print(
+                    f"  -> {AC.YELLOW}ATTENZIONE: Colonna EODHD '{c}' richiesta ma mancante per {ticker}.{AC.RESET}"
+                )
+
+        if "Close" not in df.columns or not df["Close"].notna().any():
+            if "Close_Nominal_EODHD" in df.columns and df["Close_Nominal_EODHD"].notna().any():
+                df["Close"] = df["Close_Nominal_EODHD"]
+                print(
+                    f"  -> {AC.RED}EODHD ({ticker}): 'adjusted_close' non valido. Usato 'close' nominale. OHLC potrebbero non essere aggiustati.{AC.RESET}"
+                )
+            else:
+                print(
+                    f"  -> {AC.RED}EODHD ({ticker}): ERRORE CRITICO - Nessuna colonna Close valida.{AC.RESET}"
+                )
+                return pd.DataFrame()
+
+        # Ricostruzione OHLC aggiustati
+        if (
+            "Close" in df.columns
+            and "Close_Nominal_EODHD" in df.columns
+            and "Open_Nominal_EODHD" in df.columns
+            and df["Close_Nominal_EODHD"].gt(0).any()
+        ):
+            valid_close_nominal = df["Close_Nominal_EODHD"].replace(0, np.nan)
+            adj_factor = (df["Close"] / valid_close_nominal).ffill().bfill()
+
+            df["Open"] = df["Open_Nominal_EODHD"] * adj_factor
+            if "High_Nominal_EODHD" in df.columns:
+                df["High"] = df["High_Nominal_EODHD"] * adj_factor
+            if "Low_Nominal_EODHD" in df.columns:
+                df["Low"] = df["Low_Nominal_EODHD"] * adj_factor
+            print(f"  -> EODHD ({ticker}): Colonne OHLC calcolate per essere aggiustate.")
+
+            for col_r in ["Open", "Close", "High", "Low"]:
+                if col_r in df.columns:
+                    df[col_r] = df[col_r].round(4)
+        else:
+            print(
+                f"  -> EODHD ({ticker}): {AC.YELLOW}ATTENZIONE - Impossibile calcolare prezzi OHLC aggiustati. Uso Open nominale se esiste.{AC.RESET}"
+            )
+            if "Open" not in df.columns and "Open_Nominal_EODHD" in df.columns:
+                df["Open"] = df["Open_Nominal_EODHD"]
+
+        # Colonne finali assicurate
+        final_cols = ["Open", "High", "Low", "Close", "Volume"]
+        for c in final_cols:
+            if c not in df.columns:
+                df[c] = np.nan
+        df = df[final_cols].ffill().bfill()
+
+        if df.empty or df[["Open", "Close"]].isna().any().any():
+            print(
+                f"  -> {AC.RED}Dati finali per {ticker} (periodo {period}) vuoti o con Open/Close NaN dopo processamento.{AC.RESET}"
+            )
+            return pd.DataFrame()
+
+        print(f"  -> Download EODHD per {ticker} (periodo {period}) OK ({len(df)} righe).")
+        return df
+
+    except requests.exceptions.RequestException as e_req:
+        print(f"  -> {AC.RED}ERRORE di rete/HTTP download EODHD per {ticker}: {e_req}{AC.RESET}")
+    except Exception as e_gen:
+        print(f"  -> {AC.RED}ERRORE generico processamento dati EODHD per {ticker}: {e_gen}{AC.RESET}")
+    return pd.DataFrame()
