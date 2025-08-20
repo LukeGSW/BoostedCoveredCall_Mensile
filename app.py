@@ -71,7 +71,7 @@ def build_sidebar_params() -> Dict[str, Any]:
         with col1:
             start_date = st.date_input(
                 "Data inizio",
-                value=dt.date(2015, 1, 1),
+                value=dt.date(2018, 1, 1),
                 help="Data iniziale del backtest.",
             )
         with col2:
