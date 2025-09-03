@@ -1,12 +1,16 @@
 """Logica principale della strategia e generazione figure.
 
-La funzione pubblica `esegui_analisi_completa(...)` restituisce **una lista di figure Matplotlib**
-che la webapp mostra in ordine. Nessun salvataggio CSV/HTML.
+La funzione pubblica `esegui_analisi_completa(...)` restituisce un DIZIONARIO:
+- "figures": lista di matplotlib.figure.Figure (grafici base)
+- "figures_extra": lista di matplotlib.figure.Figure (grafici addizionali, opzionali)
+
+Nota: Se desideri mantenere piena retro-compatibilità con codice esterno che attende una lista,
+puoi usare solo il campo "figures". L'app Streamlit aggiornata gestisce il dizionario.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from datetime import date, timedelta
 
 import numpy as np
@@ -43,21 +47,79 @@ DEFAULTS = {
 
 
 # ----------------------------------------------------------------------------
+# Helpers interni (solo per extra plots)
+# ----------------------------------------------------------------------------
+def _compute_dd_pct(series: pd.Series) -> pd.Series:
+    """Drawdown percentuale da una serie (equity o prezzo)."""
+    if series is None or series.empty:
+        return pd.Series(dtype=float)
+    s = series.astype(float)
+    cummax = s.cummax()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dd = (s / cummax) - 1.0
+    dd = dd.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return dd
+
+
+def _rolling_return(returns_m: pd.Series, window: int = 6) -> pd.Series:
+    """Rendimento rolling su finestra (composto): prod(1+r)-1."""
+    if returns_m is None or returns_m.empty:
+        return pd.Series(dtype=float)
+    rr = (1.0 + returns_m).rolling(window=window).apply(lambda x: np.prod(x) - 1.0, raw=True)
+    return rr.dropna()
+
+
+def _risk_return_from_monthly(returns_m: pd.Series) -> Tuple[float, float, float]:
+    """(ann_return, ann_vol, sharpe) da rendimenti mensili."""
+    if returns_m is None or returns_m.empty:
+        return (np.nan, np.nan, np.nan)
+    mu_m = returns_m.mean()
+    sd_m = returns_m.std(ddof=1)
+    ann_ret = (1.0 + mu_m) ** 12 - 1.0
+    ann_vol = sd_m * np.sqrt(12)
+    sharpe = (ann_ret / ann_vol) if (ann_vol and ann_vol > 0) else np.nan
+    return (float(ann_ret), float(ann_vol), float(sharpe))
+
+
+def _dd_durations(dd_pct: pd.Series) -> List[int]:
+    """Durate (in mesi) degli episodi di drawdown (<0)."""
+    if dd_pct is None or dd_pct.empty:
+        return []
+    durations = []
+    cur = 0
+    for val in dd_pct.values:
+        if val < 0:
+            cur += 1
+        else:
+            if cur > 0:
+                durations.append(cur)
+                cur = 0
+    if cur > 0:
+        durations.append(cur)
+    return durations
+
+
+# ----------------------------------------------------------------------------
 # Funzione principale
 # ----------------------------------------------------------------------------
-
 def esegui_analisi_completa(
     params_gui: Dict,
     plot_prefs: Optional[Dict] = None,
-) -> List[plt.Figure]:
+) -> Dict[str, List[plt.Figure]]:
     """Esegue la simulazione e genera le figure.
 
     Args:
         params_gui: dizionario parametri; chiavi come in DEFAULTS
-        plot_prefs: (ignorato in deploy, presente per compatibilità)
+        plot_prefs: preferenze plotting dalla UI (chiavi 'mostra_*')
     Returns:
-        Lista di `matplotlib.figure.Figure` nell'ordine: 1, A, B, C, 5, 6, 7
+        Dict con:
+          - "figures": Lista di `matplotlib.figure.Figure` nell'ordine: 1, A, B, C, 5, 6, 7
+          - "figures_extra": Lista di figure addizionali se richieste
     """
+    plot_prefs = plot_prefs or {}
+    show_extra = bool(plot_prefs.get("mostra_grafici_addizionali", False))
+    # (Opzionale: in futuro puoi usare anche gli altri flag 'mostra_grafico_*' per gating fine.)
+
     # Parametri
     p = {**DEFAULTS, **(params_gui or {})}
     ticker = p["EODHD_TICKER"]
@@ -80,7 +142,7 @@ def esegui_analisi_completa(
     # ----------------------------------------------------------------------------
     m = fetch_eodhd_ohlc(ticker, start, end, period="m")
     if m.empty or m.shape[0] < 2:
-        return []
+        return {"figures": [], "figures_extra": []}
 
     w = fetch_eodhd_ohlc(ticker, start, end, period="w")
     weekly_ready = False
@@ -100,6 +162,7 @@ def esegui_analisi_completa(
     # Inizializzazioni
     # ----------------------------------------------------------------------------
     figs: List[plt.Figure] = []
+    figs_extra: List[plt.Figure] = []
 
     eq_np = [total_annual_capital]
     eq_cash = [total_annual_capital]
@@ -109,7 +172,7 @@ def esegui_analisi_completa(
     # quote operative sulle linee BTD (cash/reinv) e pacchetto iniziale covered
     first_open = m["Open"].iloc[0]
     if not (np.isfinite(first_open) and first_open > 0):
-        return []
+        return {"figures": [], "figures_extra": []}
 
     initial_main_shares = cap0 / first_open if cap0 > 0 else 0.0
     shares_cash = (total_annual_capital / first_open) if total_annual_capital > 0 else 0.0
@@ -225,7 +288,7 @@ def esegui_analisi_completa(
                 trig_ret = m["Monthly_Return"].iloc[i - 1]
                 if pd.notna(trig_ret) and trig_ret < 0:
                     add_from_ret = abs(trig_ret) * cap0
-                    potential = add_from_ret + boost_fixed
+                    potential = add_from_ret + (cap0 * boost_pct)
                     remaining = max(0.0, cap0 - tot_btd_year)  # cap annuo = cap0
                     invest_btd = min(potential, remaining)
                     if invest_btd > 1e-9:
@@ -380,9 +443,9 @@ def esegui_analisi_completa(
     fig6, ax6 = plt.subplots(figsize=STYLE_CONFIG["figure_figsize"], constrained_layout=True)
     fig6.suptitle(f"Drawdown Settimanale Asset {ticker} (%) vs Limite BTD")
     if weekly_ready and "Drawdown_Asset" in w.columns and w["Drawdown_Asset"].notna().any():
-        dd_pct = w["Drawdown_Asset"] * 100
-        ax6.plot(dd_pct.index, dd_pct.values, color=STYLE_CONFIG["colors"]["drawdown_asset"], linewidth=STYLE_CONFIG["line_width"]["thin"], label="Drawdown Asset (%)")
-        ax6.fill_between(dd_pct.index, dd_pct.values, 0, where=(dd_pct.values < 0), color=STYLE_CONFIG["colors"]["drawdown_asset"], alpha=0.3)
+        dd_pct_asset = w["Drawdown_Asset"] * 100
+        ax6.plot(dd_pct_asset.index, dd_pct_asset.values, color=STYLE_CONFIG["colors"]["drawdown_asset"], linewidth=STYLE_CONFIG["line_width"]["thin"], label="Drawdown Asset (%)")
+        ax6.fill_between(dd_pct_asset.index, dd_pct_asset.values, 0, where=(dd_pct_asset.values < 0), color=STYLE_CONFIG["colors"]["drawdown_asset"], alpha=0.3)
         limit_val = dd_limit * 100
         ax6.axhline(limit_val, color="black", linestyle=":", linewidth=1.5, label=f"Limite Attivazione BTD ({limit_val:.0f}%)")
     setup_common_axis_elements(ax6, "", "Data", "Drawdown Asset (%)", y_formatter=percentage_formatter)
@@ -408,4 +471,126 @@ def esegui_analisi_completa(
     add_watermark(fig7, watermark)
     figs.append(fig7)
 
-    return figs
+    # ============================================================================
+    # GRAFICI ADDIZIONALI (opzionali)
+    # ============================================================================
+    if show_extra:
+        # Rendimenti mensili (NB: derivati da equity nominale -> includono flussi; per analisi "pura"
+        # si potrebbe normalizzare per inflow. Qui l'obiettivo è visuale).
+        r_np = s_np.pct_change().dropna()
+        r_cash = s_cash.pct_change().dropna()
+        r_reinv = s_reinv.pct_change().dropna()
+        r_bh = bh.pct_change().dropna() if not bh.empty else pd.Series(dtype=float)
+
+        # 1) VIOLIN dei rendimenti mensili
+        fig_v, ax_v = plt.subplots(figsize=STYLE_CONFIG["figure_figsize"], constrained_layout=True)
+        fig_v.suptitle(f"Distribuzione Rendimenti Mensili — {ticker}")
+        data_v = [r for r in [r_bh, r_np, r_cash, r_reinv] if not r.empty]
+        labels_v = []
+        if not r_bh.empty: labels_v.append("B&H")
+        labels_v += ["BTD No Premi", "BTD+Premi(Cash)", "BTD+Premi(Reinv)"][: len(data_v) - (1 if not r_bh.empty else 0)]
+        parts = ax_v.violinplot([d.values for d in data_v], showmeans=True, showmedians=False, showextrema=True)
+        ax_v.set_xticks(range(1, len(labels_v) + 1))
+        ax_v.set_xticklabels(labels_v, rotation=0)
+        setup_common_axis_elements(ax_v, "", "Strategie", "Rendimento Mensile", y_formatter=percentage_formatter)
+        add_watermark(fig_v, watermark)
+        figs_extra.append(fig_v)
+
+        # 2) ROLLING (6 e 12 mesi) dei rendimenti composti
+        fig_roll, ax_roll = plt.subplots(figsize=STYLE_CONFIG["figure_figsize"], constrained_layout=True)
+        fig_roll.suptitle(f"Rolling Return (6M / 12M) — {ticker}")
+        for series, label, color in [
+            (r_bh, "B&H", STYLE_CONFIG["colors"]["buy_hold"]) if not r_bh.empty else (None, None, None),
+            (r_np, "BTD No Premi", STYLE_CONFIG["colors"]["equity_no_prem"]),
+            (r_cash, "BTD + Premi (Cash)", STYLE_CONFIG["colors"]["equity_prem_accum"]),
+            (r_reinv, "BTD + Premi (Reinvest)", STYLE_CONFIG["colors"]["equity_prem_reinvest"]),
+        ]:
+            if series is None or series.empty:
+                continue
+            rr6 = _rolling_return(series, 6)
+            rr12 = _rolling_return(series, 12)
+            if not rr6.empty:
+                ax_roll.plot(rr6.index, rr6.values, linestyle="-", label=f"{label} — 6M", color=color, alpha=0.8)
+            if not rr12.empty:
+                ax_roll.plot(rr12.index, rr12.values, linestyle="--", label=f"{label} — 12M", color=color, alpha=0.8)
+        setup_common_axis_elements(ax_roll, "", "Data", "Rendimento Rolling", y_formatter=percentage_formatter)
+        setup_date_axis(ax_roll, major_locator_base=1, minor_locator_interval=3, minor_format="null")
+        ax_roll.legend(loc="upper left")
+        add_watermark(fig_roll, watermark)
+        figs_extra.append(fig_roll)
+
+        # 3) RISK/RETURN scatter (ann. return vs ann. vol) + Sharpe
+        fig_rr, ax_rr = plt.subplots(figsize=STYLE_CONFIG["figure_figsize"], constrained_layout=True)
+        fig_rr.suptitle(f"Risk / Return (ann.) — {ticker}")
+        for series, label, color in [
+            (r_bh, "B&H", STYLE_CONFIG["colors"]["buy_hold"]) if not r_bh.empty else (None, None, None),
+            (r_np, "BTD No Premi", STYLE_CONFIG["colors"]["equity_no_prem"]),
+            (r_cash, "BTD + Premi (Cash)", STYLE_CONFIG["colors"]["equity_prem_accum"]),
+            (r_reinv, "BTD + Premi (Reinvest)", STYLE_CONFIG["colors"]["equity_prem_reinvest"]),
+        ]:
+            if series is None or series.empty:
+                continue
+            ann_r, ann_v, shr = _risk_return_from_monthly(series)
+            if not (np.isnan(ann_r) or np.isnan(ann_v)):
+                ax_rr.scatter([ann_v], [ann_r], label=f"{label} (Sh {shr:.2f})", s=60)
+        setup_common_axis_elements(ax_rr, "", "Volatilità Annua", "Rendimento Annuo", y_formatter=percentage_formatter)
+        ax_rr.xaxis.set_major_formatter(percentage_formatter)
+        ax_rr.legend(loc="best")
+        add_watermark(fig_rr, watermark)
+        figs_extra.append(fig_rr)
+
+        # 4) Drawdown Duration (mesi)
+        fig_ddur, ax_ddur = plt.subplots(figsize=STYLE_CONFIG["figure_figsize"], constrained_layout=True)
+        fig_ddur.suptitle(f"Durata degli Episodi di Drawdown (mesi) — {ticker}")
+        for series, label, color in [
+            (s_np, "BTD No Premi", STYLE_CONFIG["colors"]["equity_no_prem"]),
+            (s_cash, "BTD + Premi (Cash)", STYLE_CONFIG["colors"]["equity_prem_accum"]),
+            (s_reinv, "BTD + Premi (Reinvest)", STYLE_CONFIG["colors"]["equity_prem_reinvest"]),
+        ]:
+            dd_pct = _compute_dd_pct(series)
+            durs = _dd_durations(dd_pct)
+            if durs:
+                # Istogramma "lineare" per confronto
+                values, bins = np.histogram(durs, bins=range(1, max(durs) + 2))
+                centers = (bins[:-1] + bins[1:]) / 2
+                ax_ddur.plot(centers, values, label=label)
+        ax_ddur.set_xlabel("Durata episodio (mesi)")
+        ax_ddur.set_ylabel("Frequenza")
+        ax_ddur.legend(loc="upper right")
+        add_watermark(fig_ddur, watermark)
+        figs_extra.append(fig_ddur)
+
+        # 5) Dashboard sintetica KPI (CAGR/Vol/Sharpe/MaxDD%)
+        fig_dash, ax_dash = plt.subplots(figsize=STYLE_CONFIG["figure_figsize"], constrained_layout=True)
+        fig_dash.suptitle(f"Dashboard KPI (ann.) — {ticker}")
+
+        def _kpi_block(ax, x, y, text):
+            ax.text(x, y, text, va="top", ha="left", fontsize=11, family="monospace")
+
+        # KPI per ciascuna linea
+        def _kpis(series_eq: pd.Series, label: str) -> str:
+            r_m = series_eq.pct_change().dropna()
+            ann_r, ann_v, shr = _risk_return_from_monthly(r_m)
+            dd_pct = _compute_dd_pct(series_eq)
+            maxdd = dd_pct.min() if not dd_pct.empty else np.nan
+            return (
+                f"{label}\n"
+                f"CAGR: {ann_r:,.2%}\n"
+                f"Vol:  {ann_v:,.2%}\n"
+                f"Sharpe: {shr:,.2f}\n"
+                f"MaxDD: {maxdd:,.2%}"
+            )
+
+        ax_dash.axis("off")
+        txt = "\n\n".join([
+            _kpis(s_np, "BTD No Premi"),
+            _kpis(s_cash, "BTD + Premi (Cash)"),
+            _kpis(s_reinv, "BTD + Premi (Reinvest)"),
+            _kpis(bh, "Buy & Hold") if not bh.empty else "Buy & Hold\n(n.d.)",
+        ])
+        _kpi_block(ax_dash, 0.05, 0.95, txt)
+        add_watermark(fig_dash, watermark)
+        figs_extra.append(fig_dash)
+
+    # Return strutturato (base + extra)
+    return {"figures": figs, "figures_extra": figs_extra}
