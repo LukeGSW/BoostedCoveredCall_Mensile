@@ -3,15 +3,18 @@
 # Boosted Covered Call — Studio Mensile (Streamlit)
 # =============================================================================
 # UI pulita, nessun unsafe_allow_html. Parametri in sidebar.
-# La logica è interamente in kq_btd_cc.core.esegui_analisi_completa(),
-# che deve restituire una LISTA di matplotlib.figure.Figure.
+# La logica è in kq_btd_cc.esegui_analisi_completa().
+# NOTA: ora supportiamo due formati di ritorno:
+#   1) LISTA di matplotlib.figure.Figure
+#   2) DIZIONARIO con almeno "figures" (base) ed eventualmente "figures_extra"
+#      (o sinonimi come "extra_figures"/"extra_plots") per i grafici addizionali.
 # =============================================================================
 
 from __future__ import annotations
 
 import os
 import datetime as dt
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple, Union
 
 import streamlit as st
 
@@ -31,7 +34,7 @@ st.set_page_config(
 
 
 # -----------------------------------------------------------------------------
-# Header (semplice, senza HTML unsafe)
+# Header
 # -----------------------------------------------------------------------------
 st.title("Boosted Covered Call — Studio Mensile")
 st.caption(
@@ -40,7 +43,7 @@ st.caption(
 
 
 # -----------------------------------------------------------------------------
-# Check segreto EODHD (silenzioso se presente). L'API key viene comunque letta
+# Check segreto EODHD (silenzioso se assente). L'API key viene letta anche
 # in kq_btd_cc/data_api.py, ma qui evitiamo messaggi fuorvianti in dashboard.
 # -----------------------------------------------------------------------------
 _HAS_KEY = ("EODHD_API_KEY" in st.secrets) or bool(os.getenv("EODHD_API_KEY"))
@@ -55,7 +58,7 @@ if not _HAS_KEY:
 # Sidebar — Parametri della strategia
 # Nomi dei parametri allineati 1:1 con core.esegui_analisi_completa()
 # -----------------------------------------------------------------------------
-def build_sidebar_params() -> Dict[str, Any]:
+def build_sidebar_params() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
     with st.sidebar:
         st.header("Parametri strategia")
 
@@ -139,7 +142,7 @@ def build_sidebar_params() -> Dict[str, Any]:
             value=-90.0,
             step=5.0,
             help="Se il DD settimanale dell'asset scende oltre questa soglia, il BTD è bloccato per quel mese.",
-        ) / 100.0  # core si aspetta numero in frazione (negativo)
+        ) / 100.0  # core si aspetta numero frazionario (negativo)
 
         # Preferenze plotting (allineate a core)
         st.divider()
@@ -149,7 +152,10 @@ def build_sidebar_params() -> Dict[str, Any]:
             g5 = st.checkbox("Grafico 5 — Reinvestimenti BTD mensili", value=True)
             g6 = st.checkbox("Grafico 6 — Drawdown weekly asset", value=True)
             g7 = st.checkbox("Grafico 7 — Confronto finale con Buy&Hold", value=True)
-            g_add = st.checkbox("Grafici addizionali (violin, rolling, risk/return, DD duration, dashboard)", value=False)
+            g_add = st.checkbox(
+                "Grafici addizionali (violin, rolling, risk/return, DD duration, dashboard)",
+                value=False
+            )
             g_ann = st.checkbox("Grafico rendimenti annuali operativi", value=True)
 
             # Debug opzionali (default False)
@@ -183,7 +189,7 @@ def build_sidebar_params() -> Dict[str, Any]:
             "mostra_grafico_5": g5,
             "mostra_grafico_6": g6,
             "mostra_grafico_7": g7,
-            "mostra_grafici_addizionali": g_add,
+            "mostra_grafici_addizionali": g_add,  # <--- FLAG USATO DAVVERO IN RENDERING
             "mostra_grafico_rend_annuali": g_ann,
             # Debug
             "mostra_debug_reset": dbg_reset,
@@ -194,6 +200,67 @@ def build_sidebar_params() -> Dict[str, Any]:
         }
 
     return params_gui, plot_prefs, run_btn
+
+
+# -----------------------------------------------------------------------------
+# Helpers rendering
+# -----------------------------------------------------------------------------
+def _is_matplotlib_figure(obj: Any) -> bool:
+    """Heuristica leggera per riconoscere una Figure senza importare matplotlib qui."""
+    return hasattr(obj, "savefig") and hasattr(obj, "number")
+
+
+def _extract_fig_sets(
+    res: Union[List[Any], Dict[str, Any]],
+    include_extra: bool
+) -> Tuple[List[Any], List[Any]]:
+    """
+    Estrae (base_figs, extra_figs) dal risultato del core nei due casi:
+    - res è una LISTA: tutti i grafici sono considerati base; extra vuoto.
+    - res è un DIZIONARIO: legge 'figures' e (se richiesto) una delle chiavi extra.
+    """
+    base_figs: List[Any] = []
+    extra_figs: List[Any] = []
+
+    if isinstance(res, list):
+        base_figs = res
+        return base_figs, extra_figs
+
+    if isinstance(res, dict):
+        # Base
+        base_figs = (
+            res.get("figures")
+            or res.get("plots")
+            or res.get("charts")
+            or []
+        )
+
+        # Extra (solo se richiesto)
+        if include_extra:
+            extra_figs = (
+                res.get("figures_extra")
+                or res.get("extra_figures")
+                or res.get("extra_plots")
+                or res.get("plots_extra")
+                or []
+            )
+
+    return base_figs, extra_figs
+
+
+def _render_figures(figs: List[Any], title: str | None = None) -> None:
+    if not figs:
+        return
+    if title:
+        st.subheader(title)
+    for idx, fig in enumerate(figs, start=1):
+        if _is_matplotlib_figure(fig):
+            st.pyplot(fig, use_container_width=True)
+        else:
+            # Evita crash se il core dovesse restituire Axes/oggetti non Figure
+            st.warning("Oggetto grafico non riconosciuto (attesa: matplotlib.figure.Figure).")
+        if idx < len(figs):
+            st.divider()
 
 
 # -----------------------------------------------------------------------------
@@ -218,25 +285,32 @@ st.divider()
 if run_btn:
     with st.spinner("Esecuzione backtest e generazione grafici…"):
         try:
-            # La funzione deve restituire una LISTA di matplotlib Figure
-            figs: List = esegui_analisi_completa(
+            # Chiamata al core: può restituire LISTA oppure DIZIONARIO
+            res = esegui_analisi_completa(
                 params_gui=params_gui,
                 plot_prefs=plot_prefs,
                 # export_* rimangono ai default della funzione (nessun salvataggio)
             )
 
-            if not figs:
+            include_extra = bool(plot_prefs.get("mostra_grafici_addizionali", False))
+            base_figs, extra_figs = _extract_fig_sets(res, include_extra=include_extra)
+
+            # Rendering base
+            if not base_figs and not extra_figs:
                 st.warning("Nessuna figura generata. Verifica i parametri o i dati disponibili per il ticker selezionato.")
             else:
-                for idx, fig in enumerate(figs, start=1):
-                    st.pyplot(fig, use_container_width=True)
-                    # opzionale: un separatore leggero tra i grafici
-                    if idx < len(figs):
-                        st.markdown("<hr>", unsafe_allow_html=True)
+                _render_figures(base_figs)
+
+                # Rendering extra (solo se richiesto in UI)
+                if include_extra:
+                    if extra_figs:
+                        st.divider()
+                        _render_figures(extra_figs, title="Grafici addizionali")
+                    else:
+                        st.info("Nessun grafico addizionale generato per i parametri attuali.")
 
         except Exception as ex:
             st.error("Si è verificato un errore durante l'esecuzione dell'analisi.")
-            # Mostra stacktrace utile in fase di sviluppo; rimuovi se non desideri esporlo
             st.exception(ex)
 else:
     st.info("Imposta i parametri nella sidebar e clicca **Esegui analisi**.")
