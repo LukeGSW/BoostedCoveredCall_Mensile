@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-from kq_btd_cc import CSS
+from kq_btd_cc import CSS, __version__ as VERSIONE
 from kq_btd_cc import calibration as calib
 from kq_btd_cc import charts
 from kq_btd_cc.core import PREFERENZE_DEFAULT, costruisci_config, costruisci_figure
@@ -58,10 +58,18 @@ def _kwargs_larghezza() -> Dict[str, Any]:
 
 LARGO = _kwargs_larghezza()
 
-# Estremi del calendario nella sidebar. 1970 copre tutto lo storico che EODHD
-# puo' restituire su indici e azioni, bolla dot-com e 2008 comprese.
-DATA_MINIMA = dt.date(1970, 1, 1)
+# Estremi del periodo selezionabile. 1970 copre tutto lo storico che EODHD puo'
+# restituire su indici e azioni, bolla dot-com e crisi del 2008 comprese.
+ANNO_MINIMO = 1970
 OGGI = dt.date.today()
+
+MESI_IT = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+           "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"]
+
+
+def _ultimo_giorno(anno: int, mese: int) -> dt.date:
+    """Ultimo giorno del mese indicato."""
+    return (dt.date(anno + (mese == 12), (mese % 12) + 1, 1) - dt.timedelta(days=1))
 
 
 # ---------------------------------------------------------------------------
@@ -105,25 +113,45 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
             ticker = st.text_input(
                 "Ticker EODHD", value="BTC-USD.CC",
                 help="Formato EODHD: BTC-USD.CC, ETH-USD.CC, SPY.US, AAPL.US...").strip()
-            # Senza min_value e max_value espliciti, Streamlit costruisce da solo
-            # una finestra di dieci anni attorno al valore di default: con default
-            # 2018 il calendario si fermerebbe al 2008, tagliando fuori la bolla
-            # dot-com e la crisi del 2008.
-            c1, c2 = st.columns(2)
+            # Niente st.date_input qui: il calendario di Streamlit elenca nel menu
+            # degli anni una finestra fissa di vent'anni, e ignora min_value. Con
+            # max_value a oggi si ferma al 2007, tagliando fuori la bolla dot-com.
+            # Il motore lavora su barre mensili, quindi anno e mese bastano.
+            c1, c2 = st.columns([1, 1.4])
             with c1:
-                data_inizio = st.date_input(
-                    "Inizio", value=dt.date(2018, 1, 1),
-                    min_value=DATA_MINIMA, max_value=OGGI,
-                    help="Il backtest parte da qui. Lo storico effettivo dipende dal "
-                         "ticker: EODHD restituisce i dati dalla prima data disponibile.")
+                anno_inizio = st.number_input(
+                    "Anno di inizio", min_value=ANNO_MINIMO, max_value=OGGI.year,
+                    value=2018, step=1, format="%d",
+                    help="Puoi scriverlo direttamente. Lo storico effettivo dipende dal "
+                         "ticker: EODHD parte dalla prima data che ha.")
             with c2:
-                fine_manuale = st.checkbox("Fine manuale", value=False)
-                data_fine = st.date_input(
-                    "Fine", value=OGGI - dt.timedelta(days=1),
-                    min_value=DATA_MINIMA, max_value=OGGI,
-                    disabled=not fine_manuale)
+                mese_inizio = st.selectbox(
+                    "Mese di inizio", options=list(range(1, 13)),
+                    format_func=lambda m: MESI_IT[m - 1].capitalize(), index=0)
+            data_inizio = dt.date(int(anno_inizio), int(mese_inizio), 1)
+
+            fine_manuale = st.checkbox(
+                "Imposta una data di fine", value=False,
+                help="Senza questa opzione il backtest arriva all'ultimo dato disponibile.")
+            c3, c4 = st.columns([1, 1.4])
+            with c3:
+                anno_fine = st.number_input(
+                    "Anno di fine", min_value=ANNO_MINIMO, max_value=OGGI.year,
+                    value=OGGI.year, step=1, format="%d", disabled=not fine_manuale)
+            with c4:
+                mese_fine = st.selectbox(
+                    "Mese di fine", options=list(range(1, 13)),
+                    format_func=lambda m: MESI_IT[m - 1].capitalize(),
+                    index=OGGI.month - 1, disabled=not fine_manuale)
+            data_fine = min(OGGI, _ultimo_giorno(int(anno_fine), int(mese_fine)))
+
             if fine_manuale and data_fine <= data_inizio:
-                st.error("La data di fine deve essere successiva a quella di inizio.")
+                st.error("Il periodo di fine deve venire dopo quello di inizio.")
+            st.caption(
+                f"Periodo: {MESI_IT[data_inizio.month - 1]} {data_inizio.year} → "
+                + (f"{MESI_IT[data_fine.month - 1]} {data_fine.year}" if fine_manuale
+                   else "ultimo dato disponibile")
+            )
 
         with st.expander("Capitale", expanded=True):
             capitale = st.number_input(
@@ -251,6 +279,9 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
             }
 
         esegui = st.button("Esegui il backtest", type="primary", **LARGO)
+        # Marcatore di versione: serve a capire a colpo d'occhio se il deploy ha
+        # davvero preso il codice nuovo.
+        st.caption(f"kq_btd_cc {VERSIONE} · Streamlit {st.__version__}")
 
     params: Dict[str, Any] = {
         "ticker": ticker or "BTC-USD.CC",
@@ -459,10 +490,6 @@ COLONNE_MONITOR = [
     ("versamento_mese", "Versato"), ("pnl_netto", "Utile netto"),
     ("dd_valore", "Drawdown"),
 ]
-
-MESI_IT = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
-           "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"]
-
 
 def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
     dett = dettaglio_anno(risultato, variante)
