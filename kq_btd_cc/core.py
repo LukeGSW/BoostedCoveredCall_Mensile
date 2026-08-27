@@ -74,6 +74,13 @@ CATALOGO: List[Tuple[str, str, str, Callable[[Dict[str, Any]], Any], bool]] = [
      lambda r, **kw: charts.fig_equity_drawdown(r, "premi_reinvest"), False),
     ("underwater", "mostra_grafico_underwater", "Drawdown a confronto",
      lambda r, **kw: charts.fig_underwater(r), False),
+    # La valorizzazione giornaliera e' il metro onesto del rischio: le chiusure
+    # di periodo saltano i crolli rientrati prima della fine della barra.
+    ("valorizzazione", "mostra_grafico_giornaliero", "Valorizzazione giornaliera",
+     lambda r, **kw: charts.fig_valorizzazione(r, kw.get("variante", "premi_cash")), False),
+    ("dd_frequenza", "mostra_grafico_giornaliero",
+     "Quanto nascondeva la frequenza di valorizzazione",
+     lambda r, **kw: charts.fig_dd_per_frequenza(r), False),
     ("btd", "mostra_grafico_5", "Acquisti Buy-The-Dip",
      lambda r, **kw: charts.fig_btd(r, kw.get("variante", "premi_cash")), False),
     ("dd_settimanale", "mostra_grafico_6", "Drawdown settimanale e filtro BTD",
