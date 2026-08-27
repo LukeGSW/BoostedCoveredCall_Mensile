@@ -201,7 +201,7 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                 min_value=1_000,
                 help="Impiegato all'apertura di gennaio. E' la base su cui si vende la call: "
                      "su questo si incassa il premio e su questo il rialzo viene tagliato. "
-                     "E' anche il riferimento percentuale del BTD, del boost e del tetto annuo.")
+                     "E' anche il riferimento percentuale degli acquisti BTD e del boost.")
             capitale_add = st.number_input(
                 "Capitale addizionale annuale — non coperto", value=0, step=1_000, min_value=0,
                 help="Entra una volta sola all'apertura di gennaio, insieme al capitale "
@@ -223,12 +223,8 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                 help="Percentuale del capitale iniziale che si aggiunge a OGNI acquisto BTD, "
                      "oltre alla quota legata all'entita' del calo. Eredita tutto dal BTD: "
                      "stesso momento e prezzo di acquisto, quote non coperte dalla call, "
-                     "stesso tetto annuo, liquidazione a fine anno. Da non confondere con il "
+                     "liquidazione a fine anno. Da non confondere con il "
                      "capitale addizionale annuale, che entra invece una volta sola.") / 100.0
-            tetto = st.slider(
-                "Tetto annuo agli acquisti BTD", 25, 400, 100, 25,
-                help="Massimo cumulato acquistabile in un anno, in percentuale del "
-                     "capitale fisso.") / 100.0
             limite_dd = st.slider(
                 "Sospendi il BTD sotto questo drawdown settimanale", -95.0, -20.0, -90.0, 5.0,
                 help="Se il drawdown settimanale dell'asset e' piu' profondo di questa "
@@ -374,7 +370,6 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
         "capitale_iniziale": float(capitale),
         "capitale_addizionale": float(capitale_add),
         "boost_pct": float(boost),
-        "btd_cap_annuo_pct": float(tetto),
         "btd_dd_weekly_limit": float(limite_dd),
         "btd_execution": "open" if esecuzione.startswith("Apertura") else "close",
         "strike_mode": "atm_spot" if strike_atm else "delta",
@@ -585,12 +580,28 @@ def scheda_btd(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
         f"l'entita' del calo applicata al capitale iniziale <b>piu' il BTD Boost</b>, pari al "
         f"{cfg.get('boost_pct', 0):.1%} del capitale iniziale "
         f"({fmt_currency_compact(cap0 * float(cfg.get('boost_pct', 0)))} per ogni acquisto). "
-        f"Il cumulato dell'anno non puo' superare il "
-        f"{cfg.get('btd_cap_annuo_pct', 1):.0%} del capitale iniziale "
-        f"({fmt_currency_compact(cap0 * float(cfg.get('btd_cap_annuo_pct', 1)))}); se il tetto "
-        f"taglia un acquisto, calo e boost si riducono in proporzione. Esecuzione "
+        f"Nessun limite al cumulato dell'anno: ogni segnale viene eseguito per intero. "
+        f"Esecuzione "
         f"{'all&#39;apertura' if cfg.get('btd_execution') == 'open' else 'alla chiusura'} del mese."
     )
+    m = risultato["varianti"].get("premi_cash", {}).get("metrics", {})
+    # Di default non c'e' nessun tetto; l'avviso serve solo a chi ne imposta uno
+    # da configurazione, perche' l'effetto e' controintuitivo.
+    anni_pieni = m.get("anni_con_tetto_esaurito") or 0
+    anni_tot = m.get("anni_totali") or 0
+    if cfg.get("btd_cap_annuo_pct") and anni_tot and anni_pieni >= max(2, anni_tot // 3):
+        peggiore = m.get("btd_calo_peggiore_saltato")
+        st.warning(
+            f"**Il tetto annuo e' il vincolo che decide.** Si e' esaurito in "
+            f"{anni_pieni} anni su {anni_tot}, togliendo "
+            f"{fmt_currency_compact(m.get('btd_tagliato_dal_tetto'))} agli acquisti e "
+            f"saltandone {m.get('btd_segnali_saltati', 0)} del tutto"
+            + (f", incluso un calo del {abs(peggiore):.0%}" if peggiore else "")
+            + ". In questa situazione alzare il BTD Boost non fa comprare di piu': fa "
+              "esaurire il budget prima, sui cali superficiali di inizio anno, lasciando "
+              "scoperti quelli profondi che arrivano dopo. Se vuoi che il boost si esprima, "
+              "Toglilo del tutto, oppure alzalo, se vuoi che il boost si esprima."
+        )
     for chiave in ("btd", "dd_settimanale"):
         if chiave in figure:
             grafico(figure[chiave], key=f"btd_{chiave}")
@@ -609,8 +620,7 @@ COLONNE_MONITOR = [
     ("mese", "Mese"), ("open", "Apertura"), ("close", "Chiusura"),
     ("rendimento_mese", "Rend. mese"), ("stato_btd", "Segnale"),
     ("btd_quota_calo", "BTD dal calo"), ("btd_quota_boost", "BTD dal boost"),
-    ("btd_importo", "BTD totale"), ("btd_residuo_anno", "Residuo tetto"),
-    ("capitale_impiegato_anno", "Capitale impiegato"),
+    ("btd_importo", "BTD totale"), ("capitale_impiegato_anno", "Capitale impiegato"),
     ("quote_coperte", "Quote coperte"), ("quote_extra", "Quote extra"),
     ("strike", "Strike venduto"), ("premio_pct", "Premio %"), ("premio", "Premio incassato"),
     ("intrinseco_pagato", "Intrinseco pagato"), ("netto_opzione", "Netto opzione"),
@@ -645,7 +655,7 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
          f"call ITM in {r['mesi_call_itm']} mesi su {r['mesi_trascorsi']}",
          segno_di(r["netto_opzioni"])),
         ("BTD investito", fmt_currency_compact(r["btd_investito"]),
-         f"{r['btd_numero']} acquisti · residuo {fmt_currency_compact(r['btd_residuo'])}", None),
+         f"{r['btd_numero']} acquisti nell'anno", None),
         ("di cui boost", fmt_currency_compact(r["btd_da_boost"]),
          f"calo {fmt_currency_compact(r['btd_da_calo'])}", None),
         ("Valore del conto", fmt_currency_compact(r["valore_conto"]),
@@ -657,8 +667,9 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
         f"capitale fisso impiegato a gennaio {fmt_currency_compact(r['capitale_fisso'])}",
         f"quote coperte {fmt_num(r['quote_coperte'], 4)}",
         f"quote extra {fmt_num(r['quote_extra'], 4)}",
-        f"tetto annuo BTD {fmt_currency_compact(r['btd_tetto'])}",
     ]
+    if r.get("btd_tetto"):
+        dettagli.append(f"tetto annuo BTD {fmt_currency_compact(r['btd_tetto'])}")
     dettagli.insert(1, f"BTD Boost {fmt_currency_compact(r['boost_per_acquisto'])} per acquisto")
     if r["capitale_addizionale"]:
         dettagli.insert(1, "capitale addizionale non coperto "
@@ -678,7 +689,7 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
                 f"**{piano['mese']} — reset annuale.** Liquidare tutta la posizione alla "
                 f"chiusura di dicembre e reimpiegare "
                 f"{fmt_currency_compact(piano['capitale_da_impiegare'])} all'apertura di "
-                f"gennaio. Il tetto BTD e il budget del boost ripartono da zero."
+                f"gennaio. Il ciclo degli acquisti sui cali riparte da zero."
             )
         else:
             righe = []
@@ -687,10 +698,10 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
                     f"**Acquisto BTD di {fmt_currency_compact(piano['btd_importo'])}** "
                     f"all'apertura del mese: {fmt_currency_compact(piano['btd_quota_calo'])} "
                     f"per il calo del {fmt_pct(abs(piano['rendimento_ultimo_mese']), 1)} e "
-                    f"{fmt_currency_compact(piano['btd_quota_boost'])} di boost. "
-                    f"Dopo l'acquisto resteranno "
-                    f"{fmt_currency_compact(piano['btd_residuo_anno'] - piano['btd_importo'])} "
-                    f"sotto il tetto annuo."
+                    f"{fmt_currency_compact(piano['btd_quota_boost'])} di boost."
+                    + (f" Dopo l'acquisto resteranno "
+                       f"{fmt_currency_compact(piano['btd_residuo_anno'] - piano['btd_importo'])} "
+                       f"sotto il tetto annuo." if piano.get("btd_residuo_anno") else "")
                 )
             elif piano["btd_bloccato"]:
                 righe.append(
@@ -698,7 +709,7 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
                     f"settimanale e' {fmt_pct(piano['dd_weekly'], 1)}."
                 )
             elif piano["segnale_btd"]:
-                righe.append("Segnale BTD presente ma **il tetto annuo e' esaurito**.")
+                righe.append("Segnale BTD presente ma l'importo calcolato e' nullo.")
             else:
                 righe.append(
                     f"**Nessun acquisto BTD**: l'ultimo mese ha chiuso a "
@@ -732,7 +743,7 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
     vista = pd.DataFrame({etichetta: g[col] for col, etichetta in COLONNE_MONITOR
                           if col in g.columns})
     valuta = ["Apertura", "Chiusura", "BTD dal calo", "BTD dal boost", "BTD totale",
-              "Residuo tetto", "Capitale impiegato", "Strike venduto", "Premio incassato",
+              "Capitale impiegato", "Strike venduto", "Premio incassato",
               "Intrinseco pagato",
               "Netto opzione", "Cassa", "Valore conto", "Versato", "Utile netto", "Drawdown"]
     for c in valuta:
