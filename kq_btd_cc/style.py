@@ -45,11 +45,16 @@ PALETTE: Dict[str, str] = {
     "neutro":      "#64748B",
 }
 
+# Il benchmark a parita' di mandato: colore distinto dalle tre varianti, sempre
+# tratteggiato, cosi' si riconosce a colpo d'occhio in ogni grafico.
+COLORE_BENCHMARK = PALETTE["bh_semplice"]
+
 # colore per variante del motore
 COLORE_VARIANTE: Dict[str, str] = {
     "no_premi": PALETTE["no_premi"],
     "premi_cash": PALETTE["premi_cash"],
     "premi_reinvest": PALETTE["premi_reinvest"],
+    "benchmark": COLORE_BENCHMARK,
 }
 
 # scala divergente per le heatmap dei rendimenti (rosso -> neutro -> verde)
