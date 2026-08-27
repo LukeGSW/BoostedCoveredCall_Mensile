@@ -408,6 +408,10 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                 "mostra_grafico_verdetto": st.checkbox("Verdetto contro il Buy & Hold", value=True),
                 "mostra_grafici_abc": st.checkbox("Valore e drawdown per variante", value=True),
                 "mostra_grafico_underwater": st.checkbox("Drawdown a confronto", value=True),
+                "mostra_grafico_giornaliero": st.checkbox(
+                    "Valorizzazione giornaliera", value=True,
+                    help="Rivaluta il conto ogni giorno di borsa invece che solo alla "
+                         "chiusura del periodo: e' li' che si vedono i drawdown veri."),
                 "mostra_grafico_5": st.checkbox("Acquisti Buy-The-Dip", value=True),
                 "mostra_grafico_6": st.checkbox("Drawdown settimanale e filtro", value=True),
                 "mostra_grafico_rend_annuali": st.checkbox("Rendimenti annuali", value=True),
@@ -588,8 +592,13 @@ def scheda_sintesi(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
         ("Rendimento medio — Reinvest", fmt_pct(reinvest.get("rendimento_medio")),
          f"Buy & Hold {fmt_pct(reinvest.get('ciclo_rendimento_medio'))}",
          segno_di(reinvest.get("extra_rendimento_vs_ciclo"))),
-        ("Max drawdown — Cash", fmt_pct(cash.get("max_dd_pct")),
-         f"Buy & Hold {fmt_pct(cash.get('bh_max_dd_pct'))}",
+        # Il drawdown da mostrare e' quello valorizzato ogni giorno: quello di
+        # fine periodo non vede i crolli rientrati prima della chiusura.
+        ("Max drawdown VERO — Cash",
+         fmt_pct(cash.get("max_dd_giornaliero_pct", cash.get("max_dd_pct"))),
+         (f"a fine periodo sembrava {fmt_pct(cash.get('max_dd_pct'))}"
+          if cash.get("max_dd_giornaliero_pct") is not None
+          else f"Buy & Hold {fmt_pct(cash.get('bh_max_dd_pct'))}"),
          segno_di(cash.get("riduzione_dd_vs_bh"))),
         ("Rendimento / oscillazione — Cash", fmt_num(cash.get("rendimento_su_rischio")),
          f"Buy & Hold {fmt_num(cash.get('ciclo_rendimento_su_rischio'))}",
@@ -630,9 +639,29 @@ def scheda_sintesi(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
             grafico(figure[chiave], key=f"sintesi_{chiave}")
 
 
-def scheda_rischio(figure: Dict[str, Any]) -> None:
-    for chiave in ("pnl_netto", "underwater", "eq_dd_no_premi", "eq_dd_cash",
-                   "eq_dd_reinvest", "rischio_rendimento", "durata_dd"):
+def scheda_rischio(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
+    cash = risultato["varianti"].get("premi_cash", {}).get("metrics", {})
+    vero = cash.get("max_dd_giornaliero_pct")
+    periodo = cash.get("max_dd_pct")
+    if vero is None:
+        nota("Senza dati giornalieri il conto e' valorizzato solo alla chiusura di ogni "
+             "periodo: un crollo rientrato prima della chiusura non compare, e il "
+             "drawdown qui sotto e' piu' tenero di quello vero.")
+    else:
+        nascosto = cash.get("dd_nascosto_dal_periodo")
+        intra = cash.get("max_dd_intraday_pct")
+        nota(
+            f"I drawdown di questa scheda sono misurati <b>valorizzando il conto ogni "
+            f"giorno di borsa</b>, non solo alla chiusura del periodo. Sulla variante "
+            f"Cash il massimo vero e' {fmt_pct(vero, 1)} contro il {fmt_pct(periodo, 1)} "
+            f"che si leggeva sulle sole chiusure"
+            + (f", {fmt_pct(abs(nascosto or 0), 1)} in piu'" if nascosto else "")
+            + (f"; guardando i minimi di giornata si e' arrivati a {fmt_pct(intra, 1)}"
+               if intra is not None else "") + "."
+        )
+    for chiave in ("valorizzazione", "dd_frequenza", "pnl_netto", "underwater",
+                   "eq_dd_no_premi", "eq_dd_cash", "eq_dd_reinvest",
+                   "rischio_rendimento", "durata_dd"):
         if chiave in figure:
             grafico(figure[chiave], key=f"rischio_{chiave}")
 
@@ -1242,7 +1271,7 @@ with schede[0]:
 with schede[1]:
     scheda_anno_corrente(risultato, str(prefs.get("variante_dettaglio", "premi_cash")))
 with schede[2]:
-    scheda_rischio(figure)
+    scheda_rischio(risultato, figure)
 with schede[3]:
     scheda_opzione(risultato, figure)
 with schede[4]:
