@@ -100,6 +100,16 @@ VARIANTS = {
     "premi_reinvest": {"label": "BTD + Premi (Reinvest)",   "vende_call": True,  "reinveste": True},
 }
 
+# Il termine di paragone: stesso identico ciclo annuale della strategia (capitale
+# fisso impiegato a gennaio, tutto liquidato a dicembre, si ricomincia), ma senza
+# vendere opzioni e senza comprare sui cali. Gira attraverso lo stesso motore
+# delle varianti, quindi ha le stesse colonne, le stesse metriche e la stessa
+# tabella annuale, e puo' comparire in ogni grafico accanto alle altre curve.
+BENCHMARK = "benchmark"
+SPEC_BENCHMARK = {"label": "Buy & Hold (stesso ciclo annuale)",
+                  "vende_call": False, "reinveste": False, "usa_btd": False}
+TUTTE_LE_SPEC = {**VARIANTS, BENCHMARK: SPEC_BENCHMARK}
+
 
 # ----------------------------------------------------------------------------
 # Helper temporali
@@ -162,9 +172,10 @@ def prepare_market_data(
 # Simulazione di una variante
 # ----------------------------------------------------------------------------
 def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Dict[str, Any]:
-    spec = VARIANTS[variant]
+    spec = TUTTE_LE_SPEC[variant]
     vende_call = bool(spec["vende_call"])
     reinveste = bool(spec["reinveste"])
+    usa_btd = bool(spec.get("usa_btd", True))
 
     m: pd.DataFrame = market["monthly"]
     dd_weekly: pd.Series = market["dd_weekly"]
@@ -270,7 +281,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
         quota_calo = 0.0
         quota_boost = 0.0
         prezzo_btd = O if cfg.btd_execution == "open" else C
-        if segnale and not bloccato and np.isfinite(rend_trigger) and rend_trigger < 0:
+        if usa_btd and segnale and not bloccato and np.isfinite(rend_trigger) and rend_trigger < 0:
             # quota legata all'entita' del calo del mese precedente
             quota_calo = abs(rend_trigger) * cap0
             # boost: si aggiunge per intero a ogni acquisto
@@ -562,17 +573,30 @@ def run_backtest(
     market = prepare_market_data(monthly, weekly, daily, cfg)
     m = market["monthly"]
 
+    benchmark = run_variant(market, cfg, BENCHMARK)
+    bm = benchmark["monthly"]
+
     risultati: Dict[str, Any] = {}
     for name in VARIANTS:
         res = run_variant(market, cfg, name)
+        if not res["monthly"].empty and not bm.empty:
+            idx = res["monthly"].index
+            res["monthly"]["ciclo_annuale"] = bm["valore_portafoglio"].reindex(idx)
+            res["monthly"]["ciclo_annuale_pnl"] = bm["pnl_netto"].reindex(idx)
+            res["monthly"]["ciclo_annuale_twr"] = bm["twr_mese"].reindex(idx)
+            res["monthly"]["ciclo_annuale_dd"] = bm["dd_twr_pct"].reindex(idx)
         if not res["monthly"].empty:
             res["metrics"] = compute_metrics(res["monthly"], cfg.var_confidence)
         risultati[name] = res
+
+    if not bm.empty:
+        benchmark["metrics"] = compute_metrics(bm, cfg.var_confidence)
 
     # Buy & Hold semplice: solo il capitale iniziale, mai piu' toccato
     capitale_annuo = cfg.capitale_iniziale + cfg.capitale_addizionale
     o0 = float(m["Open"].iloc[0])
     bh_semplice = (m["Close"] / o0 * capitale_annuo).rename("bh_semplice") if o0 > 0 else pd.Series(dtype=float)
+
 
     return {
         "ok": True,
@@ -585,6 +609,7 @@ def run_backtest(
             "bh_semplice": bh_semplice,
         },
         "varianti": risultati,
+        "benchmark": benchmark,
         "warnings": market["warnings"],
         # Serie giornaliera grezza: serve a ricalibrare la volatilita' con altri
         # stimatori senza riscaricare i dati. Il prefisso la tiene fuori dall'export.
