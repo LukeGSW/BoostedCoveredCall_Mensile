@@ -240,6 +240,12 @@ def fig_confronto_equity(risultato: Dict[str, Any], log: bool = False,
             fill="tozeroy", fillcolor="rgba(100,116,139,0.10)",
             hovertemplate=HT_VAL))
         _segna_ultimo_versamento(fig, rif)
+        if "capitale_impiegato_anno" in rif.columns:
+            s_imp = rif["capitale_impiegato_anno"]
+            fig.add_trace(go.Scatter(
+                x=s_imp.index, y=s_imp.values, name="Capitale impiegato nell'anno",
+                line=dict(color=PALETTE["btd"], width=1.4, shape="hv"),
+                hovertemplate=HT_VAL))
 
     _bande_anni(fig, rif.index)
     fig.update_yaxes(tickprefix="$", type="log" if log else "linear",
@@ -248,8 +254,8 @@ def fig_confronto_equity(risultato: Dict[str, Any], log: bool = False,
     fig = _layout(
         fig, "Confronto delle equity",
         "Valore totale del conto (quote a mercato piu' cassa). La banda grigia e' il denaro "
-        "entrato dall'esterno: cresce solo quando la strategia ne chiede, e si appiattisce "
-        "quando i profitti bastano a coprire il capitale di ogni gennaio.",
+        "entrato dall'esterno, che non si azzera mai perche' e' il metro dell'utile; la "
+        "linea a gradini e' il capitale davvero al lavoro, che invece riparte a ogni gennaio.",
         altezza=520)
     if fuori:
         _nota_fuori_scala(
@@ -336,6 +342,14 @@ def fig_equity_drawdown(risultato: Dict[str, Any], chiave: str) -> go.Figure:
         fill="tozeroy", fillcolor="rgba(100,116,139,0.12)",
         hovertemplate=HT_VAL), row=1, col=1)
     _segna_ultimo_versamento(fig, df, riga=1)
+    # Il capitale davvero al lavoro nel ciclo in corso: questo si azzera a ogni
+    # gennaio, mentre il versato cumulato non torna mai indietro.
+    if "capitale_impiegato_anno" in df.columns:
+        s_imp = df["capitale_impiegato_anno"]
+        fig.add_trace(go.Scatter(
+            x=s_imp.index, y=s_imp.values, name="Capitale impiegato nell'anno",
+            line=dict(color=PALETTE["btd"], width=1.5, shape="hv"),
+            hovertemplate=HT_VAL), row=1, col=1)
     bm = _benchmark(risultato)
     if bm is not None:
         sb = bm["monthly"]["valore_portafoglio"]
@@ -378,9 +392,9 @@ def fig_equity_drawdown(risultato: Dict[str, Any], chiave: str) -> go.Figure:
     _asse_tempo(fig, selettore=False, riga=2)
 
     capitale = float(((df["quote_coperte"] + df["quote_extra"]) * df["close"]).mean())
-    sotto = ("In alto il conto contro il denaro entrato dall'esterno, che si appiattisce "
-             "quando la strategia comincia ad autofinanziarsi; in basso la discesa dal "
-             "massimo, in percentuale.")
+    sotto = ("In alto il conto, il denaro entrato dall'esterno (che non si azzera mai: e' il "
+             "metro dell'utile) e il capitale al lavoro nel ciclo in corso (che riparte a "
+             "ogni gennaio); in basso la discesa dal massimo, in percentuale.")
     if bm is not None:
         cap_bm = float(((bm["monthly"]["quote_coperte"] + bm["monthly"]["quote_extra"])
                         * bm["monthly"]["close"]).mean())
