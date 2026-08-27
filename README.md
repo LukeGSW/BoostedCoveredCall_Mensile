@@ -204,6 +204,50 @@ apertura, sottostante all'apertura e premio incassato, tiene solo le vendite di 
 ignora la serie di equity giornaliera affiancata ai trade. Un esempio in formato generico
 e' in [`esempio_calibrazione.csv`](esempio_calibrazione.csv).
 
+### Due grandezze diverse che si chiamano entrambe "capitale"
+
+| | Si azzera a gennaio? | A cosa serve |
+|---|---|---|
+| **Capitale impiegato nell'anno** | **si** | quanto la strategia sta facendo lavorare adesso: capitale fisso piu' i Buy-The-Dip accumulati nel ciclo in corso |
+| **Capitale versato (cumulato)** | **no, mai** | quanto denaro e' entrato dall'esterno da quando e' partito il backtest |
+
+Il primo segue il reset annuale come tutto il resto: su S&P 500 riparte da 77.000 ogni
+gennaio, cresce durante l'anno con gli acquisti sui cali fino a un massimo di 153.338, e a
+gennaio successivo torna a 77.000. Nei grafici e' la linea a gradini.
+
+Il secondo **non deve** azzerarsi, ed e' importante capire perche': e' il metro con cui si
+misura l'utile, visto che `pnl_netto = valore del conto − capitale versato`. Azzerandolo a
+ogni gennaio, il denaro versato negli anni precedenti ricomparirebbe come guadagno — che e'
+esattamente il difetto della versione originale della dashboard, dove i versamenti dei
+Buy-The-Dip finivano contati come profitto.
+
+Nei grafici le due curve ci sono entrambe, con nomi distinti, e nella tabella mensile
+dell'anno in corso c'e' la colonna *Capitale impiegato*.
+
+### Perche' il capitale versato si appiattisce
+
+La curva del capitale versato cresce **solo quando la strategia chiede denaro**: al primo
+impiego, quando a gennaio il conto non arriva al capitale fisso, e quando un acquisto sui
+cali non trova liquidita'. Appena i profitti bastano a coprire entrambe le cose, la linea
+diventa orizzontale e resta li' per sempre.
+
+Su S&P 500 dal 2000, con 77.000 di capitale fisso, i versamenti sono stati:
+
+| Anno | Versato | Cumulato |
+|---|---|---|
+| 2000 | 89.372 | 89.372 |
+| 2001 | 10.289 | 99.661 |
+| 2002 | 4.400 | 104.062 |
+| 2003 | 875 | **104.937** |
+| dal 2004 in poi | 0 | 104.937 |
+
+Dieci mesi su 320 hanno richiesto denaro, tutti nel crollo delle dot-com. Da ottobre 2003
+la strategia si autofinanzia: il valore del conto non e' mai piu' sceso sotto i 77.000 che
+servono a gennaio, con un minimo di 96.546 nel 2008. La linea piatta a 104.937 contro un
+conto arrivato a 268.000 dice esattamente questo: di quei 268.000, poco piu' di 100.000
+sono soldi tuoi e il resto e' utile. Nei grafici il punto dell'ultimo versamento e'
+annotato, cosi' la linea orizzontale non si scambia per un errore.
+
 ### Percentuale o valuta: come si leggono i drawdown
 
 I drawdown si confrontano **solo in percentuale**. Quello in valuta dipende da quanto
