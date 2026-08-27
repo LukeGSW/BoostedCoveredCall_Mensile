@@ -15,8 +15,10 @@ Modello (una riga = un mese di calendario):
     acquista |rendimento del mese precedente| * capitale_iniziale, piu' il
     BOOST, una percentuale fissa del capitale iniziale che si aggiunge a ogni
     acquisto. Le due quote sono tracciate separatamente in `btd_quota_calo` e
-    `btd_quota_boost`. Non sono coperte dalla call, sono soggette allo stesso
-    tetto annuo e vengono liquidate a fine anno come tutto il resto.
+    `btd_quota_boost`. Non sono coperte dalla call e vengono liquidate a fine
+    anno come tutto il resto. Di default non c'e' un tetto agli acquisti
+    dell'anno: se lo si imposta, il budget si esaurisce sui cali superficiali
+    di inizio anno e i piu' profondi restano scoperti.
   * Il CAPITALE ADDIZIONALE ANNUALE e' un'altra cosa: entra una volta sola
     all'apertura di gennaio insieme al capitale fisso, compra sottostante e
     resta li' per tutto l'anno. La call venduta NON lo cappa, quindi si tiene
@@ -68,7 +70,12 @@ class BacktestConfig:
     # coperte dalla call, stesso tetto annuo, liquidazione a fine anno.
     # Da non confondere con `capitale_addizionale`, che entra una volta sola.
     boost_pct: float = 0.05
-    btd_cap_annuo_pct: float = 1.00            # tetto annuo ai BTD, % del capitale iniziale
+    # Tetto annuo agli acquisti BTD, in percentuale del capitale iniziale.
+    # None = nessun limite, ed e' il default: un tetto stringente cambia la
+    # natura della strategia, perche' il budget si esaurisce sui cali
+    # superficiali di inizio anno e lascia scoperti quelli profondi che
+    # arrivano dopo. Resta configurabile per chi lo vuole simulare.
+    btd_cap_annuo_pct: Optional[float] = None
     btd_dd_weekly_limit: float = -0.90         # blocca il BTD se il DD weekly e' sotto
     btd_execution: str = "open"                # "open" (mese del segnale) | "close" (legacy)
 
@@ -190,7 +197,8 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
     cap0 = float(cfg.capitale_iniziale)
     cap_add = float(cfg.capitale_addizionale)
     capitale_annuo = cap0 + cap_add
-    tetto_btd = cap0 * float(cfg.btd_cap_annuo_pct)
+    tetto_btd = (cap0 * float(cfg.btd_cap_annuo_pct)
+                 if cfg.btd_cap_annuo_pct else float('inf'))
     boost_per_acquisto = cap0 * float(cfg.boost_pct)
     pm = cfg.premium_model
     idle_m = float(cfg.idle_cash_rate) / 12.0
@@ -286,6 +294,8 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
         btd_importo = 0.0
         quota_calo = 0.0
         quota_boost = 0.0
+        potenziale = 0.0
+        tagliato_dal_tetto = 0.0
         prezzo_btd = O if cfg.btd_execution == "open" else C
         if usa_btd and segnale and not bloccato and np.isfinite(rend_trigger) and rend_trigger < 0:
             # quota legata all'entita' del calo del mese precedente
@@ -295,6 +305,11 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
 
             potenziale = quota_calo + quota_boost
             btd_importo = max(0.0, min(potenziale, tetto_btd - btd_usato_anno))
+            # Quanto il tetto annuo ha tolto a questo acquisto. Serve a vedere
+            # quando il tetto diventa il vincolo che decide la strategia: alzando
+            # il boost il budget si esaurisce prima, e i cali piu' profondi, che
+            # sul serio arrivano piu' tardi nell'anno, restano fuori.
+            tagliato_dal_tetto = max(0.0, potenziale - btd_importo)
             if btd_importo > 1e-9:
                 # se il tetto annuo taglia l'acquisto, taglia entrambe le quote
                 if potenziale > 0:
@@ -338,8 +353,12 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
             "segnale_btd": segnale, "btd_bloccato": bloccato, "dd_weekly": dd_w,
             "btd_importo": btd_importo,
             "btd_quota_calo": quota_calo, "btd_quota_boost": quota_boost,
-            "btd_residuo_anno": max(0.0, tetto_btd - btd_usato_anno),
+            "btd_residuo_anno": (max(0.0, tetto_btd - btd_usato_anno)
+                                 if np.isfinite(tetto_btd) else np.nan),
             "capitale_impiegato_anno": capitale_annuo + btd_usato_anno,
+            "btd_potenziale": potenziale,
+            "btd_tagliato_dal_tetto": tagliato_dal_tetto,
+            "btd_saltato_dal_tetto": bool(tagliato_dal_tetto > 1e-9 and btd_importo <= 1e-9),
             "btd_prezzo": prezzo_btd if btd_importo > 0 else np.nan,
             "sigma_stimata": float(sigma) if np.isfinite(sigma) else np.nan,
             "sigma_implicita": float(pm.implied_sigma(sigma)) if np.isfinite(sigma) else np.nan,
@@ -408,6 +427,13 @@ def _yearly_table(df: pd.DataFrame) -> pd.DataFrame:
             "btd_investito": float(g["btd_importo"].sum()),
             "btd_da_calo": float(g["btd_quota_calo"].sum()),
             "btd_da_boost": float(g["btd_quota_boost"].sum()),
+            "btd_tagliato_dal_tetto": float(g["btd_tagliato_dal_tetto"].sum()),
+            "btd_segnali_saltati": int(g["btd_saltato_dal_tetto"].sum()),
+            "btd_prezzo_medio": (
+                float(g.loc[g["btd_importo"] > 0, "btd_importo"].sum()
+                      / (g.loc[g["btd_importo"] > 0, "btd_importo"]
+                         / g.loc[g["btd_importo"] > 0, "btd_prezzo"]).sum())
+                if (g["btd_importo"] > 0).any() else float("nan")),
             "versamenti": versato,
             "capitale_medio_impiegato": capitale_medio,
             "valore_fine_anno": valore_fine,
@@ -439,7 +465,8 @@ def dettaglio_anno(risultato: Dict[str, Any], variante: str = "premi_cash",
 
     cfg = risultato.get("config", {})
     cap0 = float(cfg.get("capitale_iniziale", 0.0))
-    tetto = cap0 * float(cfg.get("btd_cap_annuo_pct", 1.0))
+    quota_tetto = cfg.get("btd_cap_annuo_pct")
+    tetto = cap0 * float(quota_tetto) if quota_tetto else float("inf")
     cap_add = float(cfg.get("capitale_addizionale", 0.0))
 
     btd_usato = float(g["btd_importo"].sum())
@@ -466,8 +493,15 @@ def dettaglio_anno(risultato: Dict[str, Any], variante: str = "premi_cash",
             "btd_investito": btd_usato,
             "btd_da_calo": float(g["btd_quota_calo"].sum()),
             "btd_da_boost": float(g["btd_quota_boost"].sum()),
-            "btd_residuo": max(0.0, tetto - btd_usato),
-            "btd_tetto": tetto,
+            "btd_tagliato_dal_tetto": float(g["btd_tagliato_dal_tetto"].sum()),
+            "btd_segnali_saltati": int(g["btd_saltato_dal_tetto"].sum()),
+            "btd_prezzo_medio": (
+                float(g.loc[g["btd_importo"] > 0, "btd_importo"].sum()
+                      / (g.loc[g["btd_importo"] > 0, "btd_importo"]
+                         / g.loc[g["btd_importo"] > 0, "btd_prezzo"]).sum())
+                if (g["btd_importo"] > 0).any() else float("nan")),
+            "btd_residuo": (max(0.0, tetto - btd_usato) if np.isfinite(tetto) else None),
+            "btd_tetto": tetto if np.isfinite(tetto) else None,
             "boost_per_acquisto": cap0 * float(cfg.get("boost_pct", 0.0)),
             "capitale_addizionale": cap_add,
             "versamenti": float(g["versamento_mese"].sum()),
@@ -498,7 +532,8 @@ def piano_prossimo_mese(risultato: Dict[str, Any], variante: str = "premi_cash")
 
     cap0 = float(cfg.get("capitale_iniziale", 0.0))
     cap_add = float(cfg.get("capitale_addizionale", 0.0))
-    tetto = cap0 * float(cfg.get("btd_cap_annuo_pct", 1.0))
+    quota_tetto = cfg.get("btd_cap_annuo_pct")
+    tetto = cap0 * float(quota_tetto) if quota_tetto else float("inf")
     boost_per_acquisto = cap0 * float(cfg.get("boost_pct", 0.0))
 
     corrente = df[df["anno"] == int(ultima["anno"])]
@@ -550,7 +585,7 @@ def piano_prossimo_mese(risultato: Dict[str, Any], variante: str = "premi_cash")
         "btd_quota_calo": quota_calo,
         "btd_quota_boost": quota_boost,
         "btd_usato_anno": btd_usato,
-        "btd_residuo_anno": max(0.0, tetto - btd_usato),
+        "btd_residuo_anno": (max(0.0, tetto - btd_usato) if np.isfinite(tetto) else None),
         "quote_coperte": quote_coperte,
         "sigma_stimata": sigma if np.isfinite(sigma) else None,
         "strike_indicativo": quota_prem.get("strike"),
