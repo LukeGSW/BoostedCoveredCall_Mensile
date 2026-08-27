@@ -12,8 +12,8 @@ premi reinvestiti non entrano, perche' arrivano dal mercato. Un CAGR calcolato
 sul conto intero direbbe altro, perche' il conto include la cassa ferma che non
 lavora e che dopo qualche anno puo' essere meta' del totale.
 
-Il rischio resta misurato sul rendimento time-weighted mensile, che neutralizza
-i flussi di cassa:
+Il rischio resta misurato sul rendimento time-weighted di ogni periodo, che
+neutralizza i flussi di cassa:
 
     r_t = valore_t / (valore_{t-1} + versamenti_t) - 1
 
@@ -36,6 +36,10 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from .cadenza import PERIODI_ANNO, adatta_dizionario, normalizza
+
+# Quanti passi elementari entrano in un anno. Resta 12 come default perche' la
+# cadenza mensile e' quella originale, ma ogni funzione accetta il valore vero.
 MESI_ANNO = 12.0
 
 
@@ -52,7 +56,7 @@ def _f(x: Any) -> Optional[float]:
 
 
 def drawdown_durations(dd: pd.Series) -> List[int]:
-    """Durate in mesi degli episodi di drawdown (valori < 0)."""
+    """Durate in periodi (mesi o settimane) degli episodi di drawdown (valori < 0)."""
     if dd is None or dd.empty:
         return []
     out, cur = [], 0
@@ -88,7 +92,7 @@ def rendimenti_annuali(df: pd.DataFrame) -> pd.DataFrame:
         risultato = valore_fine - valore_prec - versato
         capitale = float(g["capitale_impiegato_anno"].iloc[-1])
         righe.append({
-            "anno": int(anno), "mesi": int(len(g)),
+            "anno": int(anno), "periodi": int(len(g)),
             "capitale_investito": capitale,
             "risultato": risultato,
             "rendimento": risultato / capitale if capitale > 0 else np.nan,
@@ -124,7 +128,7 @@ def _blocco_rendimento(df: pd.DataFrame, prefisso: str = "") -> Dict[str, Any]:
 
 
 def var_cvar(returns: pd.Series, confidence: float = 0.99) -> Dict[str, Optional[float]]:
-    """VaR e CVaR storici mensili (valori negativi = perdita)."""
+    """VaR e CVaR storici sul rendimento di un periodo (valori negativi = perdita)."""
     r = returns.dropna()
     r = r[np.isfinite(r)]
     if len(r) < 5:
@@ -137,9 +141,18 @@ def var_cvar(returns: pd.Series, confidence: float = 0.99) -> Dict[str, Optional
 # ----------------------------------------------------------------------------
 # Metriche complete su un risultato di variante
 # ----------------------------------------------------------------------------
-def compute_metrics(df: pd.DataFrame, confidence: float = 0.99) -> Dict[str, Any]:
+def compute_metrics(df: pd.DataFrame, confidence: float = 0.99,
+                    periodi_anno: float = MESI_ANNO) -> Dict[str, Any]:
+    """Metriche di una variante. `periodi_anno` e' 12 sul mensile, 52 sul settimanale.
+
+    Serve solo a convertire il numero di barre in anni: tutto il resto (il
+    rendimento annuo sul capitale investito, i drawdown, il VaR) e' gia'
+    indipendente dalla cadenza perche' si appoggia agli anni di calendario o
+    alla singola barra.
+    """
     if df is None or df.empty:
         return {}
+    ppa = float(periodi_anno) or MESI_ANNO
 
     r = df["twr_mese"]
     vc = var_cvar(r, confidence)
@@ -171,7 +184,8 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99) -> Dict[str, Any
         "periodo_inizio": str(df.index[0].date()),
         "periodo_fine": str(df.index[-1].date()),
         "mesi": mesi,
-        "anni": _f(mesi / MESI_ANNO),
+        "periodi_anno": _f(ppa),
+        "anni": _f(mesi / ppa),
 
         # Denaro
         "valore_finale": _f(valore_fin),
@@ -388,6 +402,16 @@ ETICHETTE = {
     "riduzione_dd_vs_bh": "Riduzione del drawdown vs B&H",
     "extra_pnl_vs_bh": "Utile in piu rispetto al B&H",
 }
+
+def etichette(cadenza: str = "mensile") -> Dict[str, str]:
+    """Le etichette adattate alla cadenza scelta.
+
+    Le chiavi delle metriche restano quelle storiche (`miglior_mese`,
+    `mesi_a_debito`): a cambiare e' solo la parola che legge l'utente, che sulla
+    cadenza settimanale diventa "settimana".
+    """
+    return adatta_dizionario(ETICHETTE, cadenza)
+
 
 FORMATI = {
     "roi_su_versamenti": "pct", "max_dd_pct": "pct", "var_mensile": "pct",
