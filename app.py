@@ -610,6 +610,7 @@ COLONNE_MONITOR = [
     ("rendimento_mese", "Rend. mese"), ("stato_btd", "Segnale"),
     ("btd_quota_calo", "BTD dal calo"), ("btd_quota_boost", "BTD dal boost"),
     ("btd_importo", "BTD totale"), ("btd_residuo_anno", "Residuo tetto"),
+    ("capitale_impiegato_anno", "Capitale impiegato"),
     ("quote_coperte", "Quote coperte"), ("quote_extra", "Quote extra"),
     ("strike", "Strike venduto"), ("premio_pct", "Premio %"), ("premio", "Premio incassato"),
     ("intrinseco_pagato", "Intrinseco pagato"), ("netto_opzione", "Netto opzione"),
@@ -653,7 +654,7 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
     ])
 
     dettagli = [
-        f"capitale fisso impiegato {fmt_currency_compact(r['capitale_fisso'])}",
+        f"capitale fisso impiegato a gennaio {fmt_currency_compact(r['capitale_fisso'])}",
         f"quote coperte {fmt_num(r['quote_coperte'], 4)}",
         f"quote extra {fmt_num(r['quote_extra'], 4)}",
         f"tetto annuo BTD {fmt_currency_compact(r['btd_tetto'])}",
@@ -731,7 +732,8 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
     vista = pd.DataFrame({etichetta: g[col] for col, etichetta in COLONNE_MONITOR
                           if col in g.columns})
     valuta = ["Apertura", "Chiusura", "BTD dal calo", "BTD dal boost", "BTD totale",
-              "Residuo tetto", "Strike venduto", "Premio incassato", "Intrinseco pagato",
+              "Residuo tetto", "Capitale impiegato", "Strike venduto", "Premio incassato",
+              "Intrinseco pagato",
               "Netto opzione", "Cassa", "Valore conto", "Versato", "Utile netto", "Drawdown"]
     for c in valuta:
         if c in vista.columns:
