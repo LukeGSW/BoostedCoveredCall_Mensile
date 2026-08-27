@@ -1,8 +1,11 @@
-# Boosted Covered Call — Studio Mensile
+# Boosted Covered Call — Studio Mensile e Settimanale
 
 Dashboard Streamlit per il backtest della strategia **Boosted Covered Call**: un capitale
-fisso deciso a inizio anno, coperto da una call mensile venduta a delta 0.50, con acquisti
-Buy-The-Dip potenziati sui mesi negativi e liquidazione totale a fine anno.
+fisso deciso a inizio anno, coperto da una call venduta a delta 0.50, con acquisti
+Buy-The-Dip potenziati dopo ogni periodo negativo e liquidazione totale a fine anno.
+
+Uno **switch in cima alla sidebar** sceglie il passo della strategia — **Mensile** (il
+default, la versione originale) oppure **Settimanale** — e tutto il resto lo segue.
 
 Le curve messe a confronto:
 
@@ -17,7 +20,7 @@ Le curve messe a confronto:
 
 Il benchmark che conta e' il primo. Gli ultimi due non liquidano mai: su un sottostante
 molto direzionale accumulano quote comprate anni prima a una frazione del prezzo e
-arrivano a valori che non sono confrontabili con una strategia che chiude ogni dodici mesi.
+arrivano a valori che non sono confrontabili con una strategia che chiude ogni anno.
 Su BTC dal 2010 il buy and hold che non liquida arriva a **108 miliardi** contro i 7,3
 milioni del ciclo annuale: quando succede viene escluso dai grafici a scala lineare, con
 una nota che ne riporta il valore, e resta visibile in scala logaritmica.
@@ -27,6 +30,52 @@ ha le stesse colonne, le stesse metriche e la stessa tabella annuale, e compare 
 alle altre curve in ogni grafico: equity, utile netto, drawdown, equity e drawdown della
 singola variante, rischio e rendimento, durata degli episodi di drawdown, rendimenti
 annuali, distribuzione dei rendimenti, tabella delle metriche e dettaglio anno per anno.
+
+---
+
+## Le due cadenze
+
+Il passo elementare del backtest e' una barra: un mese di calendario oppure una settimana.
+Cambia quello, e basta.
+
+| | Mensile | Settimanale |
+|---|---|---|
+| Barre in un anno | 12 | ~52 |
+| Scadenza della call venduta | fine mese | fine settimana |
+| Vita dell'opzione usata nel prezzo | i giorni del mese | 7 giorni |
+| Segnale Buy-The-Dip | il mese precedente ha chiuso in negativo | la settimana precedente ha chiuso in negativo |
+| BTD Boost | su ogni acquisto | su ogni acquisto, quindi molte volte di piu' |
+| Interessi su cassa e debito | tasso annuo / 12 | tasso annuo / 52 |
+| **Ciclo annuale** | **identico** | **identico** |
+
+Quello che **non** cambia e' tutto il resto: il capitale si decide a gennaio con le stesse
+regole (fisso o crescente), le quote coperte restano invariate per l'anno, il capitale
+addizionale entra una volta sola, si liquida a dicembre e si ricomincia. Anche il modo di
+misurare e' lo stesso: il rendimento resta quello semplice **annuo** sul capitale
+investito, e i drawdown restano time-weighted sulla singola barra.
+
+**Cosa aspettarsi dalla settimanale.** La call dura sette giorni invece di trenta, quindi
+il singolo premio vale circa la meta' di quello mensile — il valore temporale cresce con
+la radice del tempo, non con il tempo — ma se ne incassano 52 invece di 12: l'incasso
+lordo dell'anno **circa raddoppia**. Cresce pero' anche il numero di volte in cui la call
+finisce in-the-money e va riacquistata a intrinseco, e soprattutto esplode il numero di
+Buy-The-Dip: su otto anni di test sintetici, 178 acquisti contro 40. E' la versione
+aggressiva: piu' premio incassato, ma anche molto piu' capitale da tirare fuori per i cali
+e piu' occasioni di farsi tagliare il rialzo. Con il **boost** conviene tenerne conto —
+lo stesso 10% che sul mensile vale al massimo 1,2 volte il capitale iniziale in un anno,
+sul settimanale ne vale fino a 5,2.
+
+**Dati.** La cadenza settimanale usa le barre settimanali di EODHD, che vengono comunque
+gia' scaricate per il filtro sul drawdown. La volatilita' continua a stimarsi sui dati
+**giornalieri**: le finestre della sidebar restano in giorni di borsa e non vanno toccate
+quando si cambia passo. Il taglio anti-look-ahead si sposta di conseguenza — il premio
+della settimana usa la volatilita' nota **prima del lunedi**, mai quella della settimana
+in corso.
+
+**Le parole.** I nomi delle colonne restano quelli storici (`rendimento_mese`, `twr_mese`,
+`versamento_mese`) anche in cadenza settimanale, cosi' export e file salvati in passato
+restano leggibili: vanno letti come "del periodo". A schermo invece i testi si adattano, e
+il campo `parametri.cadenza` dell'export dice sempre con che passo ha girato il backtest.
 
 ---
 
@@ -491,6 +540,7 @@ La chiave si puo' passare come variabile d'ambiente `EODHD_API_KEY` oppure in
 ```
 app.py                    dashboard Streamlit
 kq_btd_cc/
+  cadenza.py              mensile o settimanale: periodi per anno e vocabolario dei testi
   data_api.py             download EODHD (giornaliero, settimanale, mensile) con cache
   vol.py                  stimatori di volatilita' realizzata
   pricing.py              Black-Scholes senza scipy, strike a delta obiettivo
@@ -509,6 +559,9 @@ kq_btd_cc/
 
 ## Cosa e' cambiato rispetto alla versione precedente
 
+- Esiste la **cadenza settimanale**, scelta con lo switch in cima alla sidebar: stessa
+  strategia con passo di sette giorni invece di trenta. Piu' premi incassati e molti piu'
+  acquisti sui cali; il ciclo annuale non cambia di una virgola.
 - Il cap della covered call **si accumula**. Prima il valore del pacchetto veniva
   ricalcolato da zero ogni mese partendo dall'apertura, e il guadagno tagliato dalla call
   tornava indietro il mese successivo: su un sottostante che saliva del 5% al mese per due
