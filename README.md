@@ -93,8 +93,118 @@ piu' profondo rimasto scoperto, e compare un avviso.
 
 **Contabilita'.** Ogni euro entrato dall'esterno finisce in `versamenti_cum`, cosi'
 `pnl_netto = valore_portafoglio − versamenti_cum` e' il risultato vero. Rendimenti,
-volatilita', Sharpe, drawdown e VaR sono calcolati sul **rendimento time-weighted**, che
-neutralizza i flussi di cassa.
+il rendimento e' quello semplice annuo sul capitale investito, mentre drawdown e VaR sono
+calcolati sul **rendimento time-weighted** mensile, che neutralizza i flussi di cassa.
+
+### Il capitale di gennaio: fisso o crescente
+
+E' la scelta che decide il risultato piu' di ogni altra, e va fatta consapevolmente.
+
+Con **capitale fisso** ogni gennaio si rimette al lavoro sempre lo stesso importo e i
+profitti restano in cassa. La strategia non compone: guadagna ogni anno piu' o meno la
+stessa cifra in valuta, la curva cresce in **linea retta** invece che esponenzialmente, e il
+rendimento si diluisce anno dopo anno perche' il conto cresce mentre il capitale al lavoro
+no. Su S&P 500 dal 2000 con 75.000 impiegati: il capitale di gennaio passa da 75.000 a
+78.763 in ventisei anni (**+5%**) mentre il conto cresce del **+327%**.
+
+Con **capitale crescente** gli utili tornano al lavoro ogni gennaio, mantenendo la
+proporzione fra parte coperta e parte scoperta. Una quota resta liquida per finanziare gli
+acquisti sui cali durante l'anno: senza quella riserva ogni Buy-The-Dip richiederebbe denaro
+fresco e il capitale versato crescerebbe insieme al conto.
+
+Stessi identici parametri, su S&P 500 dal 2000:
+
+| | Capitale fisso | Capitale crescente |
+|---|---|---|
+| Rendimento medio annuo | 2,90% | **4,25%** |
+| Capitale versato | 130.684 | **75.000** (solo quello iniziale) |
+| Max drawdown | −40,2% | −38,2% |
+| Rendimento / oscillazione | 0,32 | **0,44** |
+| Quota del conto investita | 59% | 69% |
+
+Il capitale crescente **si autofinanzia**: non serve un euro oltre il capitale iniziale.
+
+### Audit: da dove viene il risultato
+
+Ogni mese il P&L viene ricostruito dalle sue componenti elementari, e la somma coincide al
+centesimo con la variazione del conto. Su S&P 500 dal 2000, capitale coperto 25.000 piu'
+50.000 non coperti, boost 15%:
+
+| Voce | |
+|---|---|
+| Movimento delle quote | **+180.131** |
+| Premi incassati | +132.484 |
+| Intrinseco pagato sulle call | **−139.077** |
+| Interessi su cassa e debito | −100 |
+| **Utile netto** | **178.018** |
+
+**Le opzioni nettano −6.593 in ventisei anni**: i premi incassati sono quasi esattamente
+pari all'intrinseco pagato. Non e' un difetto del modello. I 312 prezzi reali di call ATM
+mensili su SPX dello stesso periodo dicono la stessa cosa, anzi peggio: 1.225.538 di premi
+contro 1.486.082 pagati alla scadenza, cioe' **−260.544**, pari a −0,29% del sottostante al
+mese. Il modello e' se mai leggermente ottimista, perche' lo strike a delta 0.50 sta un
+filo sopra lo spot mentre le operazioni reali usavano lo strike quotato piu' vicino.
+
+Il risultato reale, per periodo:
+
+| | 2000-2004 | 2005-2009 | 2010-2014 | 2015-2019 | 2020-2024 |
+|---|---|---|---|---|---|
+| Netto della call venduta | **+23,8%** | +4,8% | −39,6% | −26,8% | **−42,8%** |
+
+Vendere call vicino al denaro funzionava nel decennio laterale e costa caro da quando il
+mercato sale con decisione. La dashboard mostra questa decomposizione nella scheda *Opzione
+e premio*.
+
+Il salto annuale, invece, non c'entra: liquidare a dicembre e ricomprare all'apertura di
+gennaio e' costato in tutto 1.387 su ventisei passaggi d'anno, una cinquantina di dollari
+per volta.
+
+### Le tre leve che cambiano il verdetto
+
+Misurate sullo stesso backtest:
+
+| Leva | Effetto |
+|---|---|
+| **Capitale crescente** | rendimento medio da 2,90% a 4,25%, versamenti da 130.684 a 75.000, rendimento/oscillazione da 0,32 a 0,44 |
+| **Delta della call** | a 0.50 le opzioni tolgono 12.366; a 0.30 ne aggiungono 1.030, a 0.20 ne aggiungono 3.281, e il drawdown resta comunque sotto quello del solo sottostante |
+| **Remunerazione della cassa** | da 0% a 4% l'utile passa da 172.268 a 295.040 e il rendimento medio da 2,93% a 4,29% |
+| **Dividendi** | `GSPC.INDX` e' un indice di prezzo e li esclude, circa due punti l'anno. Su `SPY.US` il motore usa i prezzi rettificati e ci sono |
+
+Combinando delta 0.30 e cassa al 4%: rendimento medio 4,39% contro 4,14% del solo
+sottostante, drawdown
+−41,7% contro −46,3%, rendimento/oscillazione 0,50 contro 0,43. L'edge esiste ma sta quasi tutto nel rischio,
+non nel rendimento.
+
+### Come si misura il rendimento
+
+La strategia liquida tutto a dicembre e riparte a gennaio: ogni anno e' un ciclo chiuso a
+se' stante. Il numero naturale non e' un tasso composto, ma il **rendimento semplice di
+ogni anno sul capitale davvero investito in quel ciclo**:
+
+    rendimento dell'anno = risultato dell'anno / (capitale di gennaio + acquisti sui cali)
+
+Al denominatore c'e' solo il denaro che esce dalle tasche di chi investe. I **premi
+reinvestiti non entrano**, perche' arrivano dal mercato e non sono capitale conferito.
+
+Un tasso composto sul conto intero direbbe tutt'altro, e sarebbe fuorviante: il conto
+include la cassa ferma, che dopo qualche anno puo' essere meta' del totale e diluisce
+qualunque percentuale. Su S&P 500 dal 2000 la stessa simulazione da' **7,8% di rendimento
+medio annuo** contro un tasso composto sul conto del 2,9%.
+
+Le metriche di rendimento sono quindi: rendimento medio e mediano, oscillazione dei
+rendimenti annuali, rapporto fra i due (che sostituisce lo Sharpe), rendimento diviso max
+drawdown, anni chiusi in utile, miglior e peggior anno. Il **rischio** resta misurato sul
+rendimento time-weighted mensile, che neutralizza i flussi di cassa.
+
+### I premi restano in cassa
+
+Nella variante **Premi (Cash)** i premi incassati finiscono in un conto separato che **non
+finanzia gli acquisti sui cali**: quelli si pagano con capitale proprio. Nel campo
+`cassa_opzioni` si vede in ogni momento quanto della liquidita' viene dalle opzioni. A fine
+anno, con la liquidazione, i due conti si riuniscono.
+
+Il risultato non cambia, cambia la lettura: senza la separazione i premi riducevano i
+versamenti necessari e non si capiva piu' quanto capitale la strategia richiedesse davvero.
 
 ### Il vero freno: meta' del conto sta ferma
 
@@ -105,16 +215,16 @@ e sul periodo intero la media e' del **48%**.
 
 Questo ha due conseguenze che vanno tenute a mente leggendo i risultati.
 
-**Il CAGR e' diluito.** Calcolato sul conto intero da' 2,51%, ma meta' di quel conto non
-lavora. Sul capitale effettivamente impiegato il rendimento e' **3,90% all'anno**. La
-dashboard riporta entrambi: *CAGR* e *Rendimento annuo sul capitale impiegato*, con accanto
-*Quota media del conto investita*.
+**Il rendimento va misurato sul capitale investito.** Un tasso calcolato sul conto intero
+darebbe il 2,51%, ma meta' di quel conto non lavora. La dashboard usa il rendimento medio
+annuo sul capitale davvero impiegato, e riporta accanto la *Quota media del conto
+investita* perche' si veda quanta liquidita' resta ferma.
 
 **La remunerazione della cassa conta piu' di quanto sembri.** Il default e' 0%, cioe' liquidita'
 ferma sul conto che non rende nulla per ventisei anni. Con un tasso realistico il quadro
 cambia in modo sostanziale:
 
-| Cassa remunerata al | Valore finale | Utile netto | CAGR | Sharpe |
+| Cassa remunerata al | Valore finale | Utile netto | Rendimento | Rend./oscill. |
 |---|---|---|---|---|
 | 0% (default) | 518.546 | 267.625 | 2,51% | 0,34 |
 | 2% | 628.771 | 380.044 | 3,31% | 0,46 |
@@ -408,8 +518,9 @@ kq_btd_cc/
   in cui il sottostante perdeva oltre il 90% la curva mostrava comunque centinaia di
   migliaia di dollari di "guadagno", quasi interamente costituiti dai soldi versati.
 - Il **Buy & Hold e' confrontabile**: riceve gli stessi versamenti negli stessi mesi.
-- I rendimenti sono **time-weighted**, quindi Sharpe, volatilita', VaR e drawdown percentuale
-  non sono piu' distorti dai flussi di cassa.
+- Il **rendimento e' quello semplice annuo sul capitale investito**, non un tasso composto
+  sul conto: il conto include la cassa ferma e diluiva ogni percentuale. Drawdown e VaR
+  restano time-weighted, quindi non distorti dai flussi di cassa.
 - Il **premio e' stimato** dalla volatilita' del sottostante e calibrabile sui prezzi reali.
   La percentuale fissa da regolare a mano non esiste piu': era un valore arbitrario che
   sovrastimava l'incasso su SPX del 205%.
