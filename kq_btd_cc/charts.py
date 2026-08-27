@@ -142,6 +142,34 @@ def _traccia_benchmark(fig: go.Figure, x, y, nome: str = "", spesso: bool = Fals
         fig.add_trace(traccia, row=riga, col=1)
 
 
+def _segna_ultimo_versamento(fig: go.Figure, df: pd.DataFrame,
+                             riga: Optional[int] = None) -> None:
+    """Marca il punto oltre il quale la strategia non ha piu' chiesto denaro.
+
+    La curva del capitale versato diventa piatta quando i profitti bastano a
+    coprire il capitale fisso di ogni gennaio e gli acquisti sui cali. Senza
+    questa nota la linea orizzontale sembra un errore, mentre e' il momento in
+    cui la strategia comincia ad autofinanziarsi.
+    """
+    if "versamento_mese" not in df.columns:
+        return
+    con_versamento = df.index[df["versamento_mese"] > 1e-9]
+    if len(con_versamento) == 0 or con_versamento[-1] >= df.index[-4:][0]:
+        return
+    quando = con_versamento[-1]
+    totale = float(df["versamenti_cum"].iloc[-1])
+    kw = dict(x=quando, y=totale,
+              text=(f"da qui in poi non serve altro denaro<br>"
+                    f"totale versato ${totale:,.0f}"),
+              showarrow=True, arrowhead=0, arrowsize=1, arrowwidth=1,
+              arrowcolor=PALETTE["versamenti"], ax=30, ay=-34, xanchor="left",
+              align="left", font=dict(color=PALETTE["text_muted"], size=10))
+    if riga is None:
+        fig.add_annotation(**kw)
+    else:
+        fig.add_annotation(**kw, row=riga, col=1)
+
+
 def _serie_varianti(risultato: Dict[str, Any], colonna: str) -> Dict[str, pd.Series]:
     out: Dict[str, pd.Series] = {}
     for chiave, res in risultato.get("varianti", {}).items():
@@ -207,10 +235,11 @@ def fig_confronto_equity(risultato: Dict[str, Any], log: bool = False,
     if mostra_versamenti and "versamenti_cum" in rif.columns:
         s = rif["versamenti_cum"]
         fig.add_trace(go.Scatter(
-            x=s.index, y=s.values, name="Capitale versato",
+            x=s.index, y=s.values, name="Capitale versato (cumulato)",
             line=dict(color=PALETTE["versamenti"], width=1.4, dash="longdash"),
             fill="tozeroy", fillcolor="rgba(100,116,139,0.10)",
             hovertemplate=HT_VAL))
+        _segna_ultimo_versamento(fig, rif)
 
     _bande_anni(fig, rif.index)
     fig.update_yaxes(tickprefix="$", type="log" if log else "linear",
@@ -218,8 +247,9 @@ def fig_confronto_equity(risultato: Dict[str, Any], log: bool = False,
     _asse_tempo(fig)
     fig = _layout(
         fig, "Confronto delle equity",
-        "Valore totale del conto (quote a mercato piu' cassa). La banda grigia e' il "
-        "denaro effettivamente versato: quanto la curva le sta sopra e' utile vero.",
+        "Valore totale del conto (quote a mercato piu' cassa). La banda grigia e' il denaro "
+        "entrato dall'esterno: cresce solo quando la strategia ne chiede, e si appiattisce "
+        "quando i profitti bastano a coprire il capitale di ogni gennaio.",
         altezza=520)
     if fuori:
         _nota_fuori_scala(
@@ -301,10 +331,11 @@ def fig_equity_drawdown(risultato: Dict[str, Any], chiave: str) -> go.Figure:
                         subplot_titles=("", ""))
 
     fig.add_trace(go.Scatter(
-        x=df.index, y=df["versamenti_cum"], name="Capitale versato",
+        x=df.index, y=df["versamenti_cum"], name="Capitale versato (cumulato)",
         line=dict(color=PALETTE["versamenti"], width=1.3, dash="longdash"),
         fill="tozeroy", fillcolor="rgba(100,116,139,0.12)",
         hovertemplate=HT_VAL), row=1, col=1)
+    _segna_ultimo_versamento(fig, df, riga=1)
     bm = _benchmark(risultato)
     if bm is not None:
         sb = bm["monthly"]["valore_portafoglio"]
@@ -347,8 +378,9 @@ def fig_equity_drawdown(risultato: Dict[str, Any], chiave: str) -> go.Figure:
     _asse_tempo(fig, selettore=False, riga=2)
 
     capitale = float(((df["quote_coperte"] + df["quote_extra"]) * df["close"]).mean())
-    sotto = ("In alto il conto contro il capitale versato, in basso la discesa dal massimo, "
-             "in percentuale.")
+    sotto = ("In alto il conto contro il denaro entrato dall'esterno, che si appiattisce "
+             "quando la strategia comincia ad autofinanziarsi; in basso la discesa dal "
+             "massimo, in percentuale.")
     if bm is not None:
         cap_bm = float(((bm["monthly"]["quote_coperte"] + bm["monthly"]["quote_extra"])
                         * bm["monthly"]["close"]).mean())
