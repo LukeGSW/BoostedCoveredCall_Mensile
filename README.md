@@ -71,6 +71,26 @@ componenti sono tracciate separatamente in `btd_quota_calo` e `btd_quota_boost`,
 tabella e in ogni export: su un backtest tipico il boost vale il 40% di tutto il capitale
 investito in Buy-The-Dip.
 
+**Nessun tetto agli acquisti.** Di default il cumulato degli acquisti BTD di un anno non
+ha limite: ogni segnale viene eseguito per intero. Un tetto e' ancora impostabile da
+configurazione (`btd_cap_annuo_pct`), ma non e' esposto nella dashboard perche' cambia la
+natura della strategia in un modo controintuitivo: il budget si esaurisce sui cali
+superficiali di inizio anno e lascia scoperti quelli profondi che arrivano dopo. Su BTC nel
+2022, con un tetto al 100%, boost 0% e boost 15% investivano gli stessi 35.000 ma il secondo
+finiva il budget a maggio e saltava il crollo del −37,8% di giugno, pagando le quote il 36%
+in piu'. Senza tetto il boost si comporta come deve, in modo proporzionale:
+
+| Boost | BTD investito | Quote | Acquisti | Utile netto |
+|---|---|---|---|---|
+| 0% | 140.508 | 5,52 | 35 | 101.726 |
+| 5% | 201.758 | 7,72 | 35 | 122.900 |
+| 15% | 324.258 | 12,11 | 35 | 165.249 |
+| 30% | 508.008 | 18,70 | 35 | 228.832 |
+
+Quando un tetto e' impostato, la dashboard lo segnala: i segnali saltati sono marcati nel
+grafico dei Buy-The-Dip, le metriche riportano quanto e' stato tagliato e qual e' il calo
+piu' profondo rimasto scoperto, e compare un avviso.
+
 **Contabilita'.** Ogni euro entrato dall'esterno finisce in `versamenti_cum`, cosi'
 `pnl_netto = valore_portafoglio − versamenti_cum` e' il risultato vero. Rendimenti,
 volatilita', Sharpe, drawdown e VaR sono calcolati sul **rendimento time-weighted**, che
