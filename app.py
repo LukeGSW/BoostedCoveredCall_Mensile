@@ -210,7 +210,11 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                      "nessun premio. Viene liquidato a fine anno come il resto.")
             idle = st.slider(
                 "Remunerazione della cassa non impiegata (annua)", 0.0, 6.0, 0.0, 0.25,
-                help="Interesse riconosciuto sulla liquidita' ferma fra un ciclo e l'altro.") / 100.0
+                help="Conta piu' di quanto sembri. Il reset annuale reimpiega solo il "
+                     "capitale fisso e lascia ferma tutta la liquidita' accumulata: dopo "
+                     "qualche anno puo' essere meta' del conto. A 0% quella meta' non rende "
+                     "nulla per tutto il backtest. Metti il tasso che ti riconoscono davvero "
+                     "sul saldo, o quello di un monetario se ce la parcheggi.") / 100.0
             debito = st.slider(
                 "Costo del saldo a debito (annuo)", 0.0, 15.0, 6.0, 0.5,
                 help="Quando il riacquisto della call a scadenza supera la liquidita' "
@@ -451,6 +455,24 @@ def _avvisi_sottostante(risultato: Dict[str, Any], metriche: Dict[str, Any]) -> 
                 f"sottostante che corre. Se vuoi tenere piu' rialzo, abbassa il delta della "
                 f"call nella sidebar."
             )
+    quota = metriche.get("quota_conto_investita")
+    if quota is not None and quota < 0.80:
+        tasso = float(risultato.get("config", {}).get("idle_cash_rate", 0.0))
+        msg = (
+            f"**Solo il {quota:.0%} del conto e' investito**, il resto e' cassa: il reset "
+            f"annuale reimpiega il capitale fisso e lascia ferma tutta la liquidita' "
+            f"accumulata (in media {fmt_currency_compact(metriche.get('cassa_media'))}). "
+            f"Il CAGR del {fmt_pct(metriche.get('cagr'), 2)} e' calcolato sul conto intero, "
+            f"quindi e' diluito da quella parte che non lavora: sul capitale davvero "
+            f"impiegato il rendimento e' "
+            f"**{fmt_pct(metriche.get('rendimento_capitale_impiegato'), 2)} all'anno**."
+        )
+        if tasso <= 0:
+            msg += (" E quella cassa e' remunerata allo 0%: se la parcheggi in un monetario, "
+                    "imposta il tasso nella sidebar sotto *Capitale*, perche' su questi "
+                    "importi cambia molto il risultato.")
+        st.info(msg)
+
     bh = metriche.get("bh_stessi_flussi_pnl")
     ciclo = metriche.get("ciclo_pnl")
     if bh and ciclo and abs(ciclo) > 0 and abs(bh) > 20 * abs(ciclo):
@@ -481,6 +503,9 @@ def scheda_sintesi(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
          segno_di(cash.get("riduzione_dd_vs_bh"))),
         ("Sharpe — Cash", fmt_num(cash.get("sharpe")),
          f"Buy & Hold {fmt_num(cash.get('bh_sharpe'))}", None),
+        ("Resa del capitale impiegato",
+         fmt_pct(reinvest.get("rendimento_capitale_impiegato")),
+         f"conto investito al {fmt_pct(reinvest.get('quota_conto_investita'), 0)}", None),
         ("Premio medio stimato", fmt_pct(cash.get("premio_pct_medio")),
          "del prezzo del sottostante, al mese", None),
         ("Call in-the-money", f"{cash.get('mesi_call_assegnata', 0)}/{cash.get('mesi', 0)}",
