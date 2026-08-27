@@ -206,6 +206,16 @@ descrive ogni campo.
    EODHD_API_KEY = "la-tua-api-key"
    ```
 
+### Scegliere il periodo
+
+Anno e mese si impostano con due campi separati, non col calendario: il selettore di
+Streamlit elenca nel menu degli anni una finestra fissa di vent'anni e ignora `min_value`,
+quindi si fermerebbe una ventina d'anni indietro tagliando fuori la bolla dot-com. Qui
+l'anno si puo' scrivere direttamente e si arriva al 1970. Il motore lavora comunque su
+barre mensili, quindi il giorno non aggiungerebbe niente.
+
+Lo storico effettivo dipende dal ticker: EODHD restituisce i dati dalla prima data che ha.
+
 ### In locale
 ```bash
 pip install -r requirements.txt
