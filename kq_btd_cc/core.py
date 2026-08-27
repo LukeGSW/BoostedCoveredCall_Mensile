@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import pandas as pd
 
 from . import charts
+from .cadenza import adatta, normalizza
 from .data_api import ChiaveMancante, DatiNonDisponibili, carica_serie
 from .engine import BacktestConfig, run_backtest
 from .pricing import PremiumModel
@@ -89,8 +90,10 @@ CATALOGO: List[Tuple[str, str, str, Callable[[Dict[str, Any]], Any], bool]] = [
      lambda r, **kw: charts.fig_heatmap_mensile(r, kw.get("variante", "premi_reinvest")), True),
     ("distribuzione", "mostra_grafici_addizionali", "Distribuzione dei rendimenti",
      lambda r, **kw: charts.fig_distribuzione(r), True),
-    ("rolling", "mostra_grafici_addizionali", "Rendimento rolling a 12 mesi",
-     lambda r, **kw: charts.fig_rolling(r, 12), True),
+    # La finestra e' sempre lunga un anno: dodici barre sul mensile, cinquantadue
+    # sul settimanale. La decide il grafico leggendo la cadenza del backtest.
+    ("rolling", "mostra_grafici_addizionali", "Rendimento rolling a un anno",
+     lambda r, **kw: charts.fig_rolling(r), True),
     ("rischio_rendimento", "mostra_grafici_addizionali", "Rischio e rendimento",
      lambda r, **kw: charts.fig_rischio_rendimento(r), True),
     ("durata_dd", "mostra_grafici_addizionali", "Durata degli episodi di drawdown",
@@ -111,6 +114,8 @@ def costruisci_figure(
 ) -> Dict[str, Any]:
     """Costruisce solo le figure richieste. Un grafico che fallisce non blocca gli altri."""
     prefs = {**PREFERENZE_DEFAULT, **(plot_prefs or {})}
+    # I titoli sono scritti al mensile: qui diventano settimanali se serve.
+    cadenza = normalizza((risultato.get("config") or {}).get("cadenza"))
     figure: Dict[str, Any] = {}
     titoli: Dict[str, str] = {}
     base: List[Any] = []
@@ -123,10 +128,10 @@ def costruisci_figure(
         try:
             fig = costruttore(risultato, variante=variante_dettaglio, log=log_equity)
         except Exception as e:                       # un grafico rotto non ferma la dashboard
-            errori.append(f"{titolo}: {e}")
+            errori.append(f"{adatta(titolo, cadenza)}: {e}")
             continue
         figure[chiave] = fig
-        titoli[chiave] = titolo
+        titoli[chiave] = adatta(titolo, cadenza)
         (extra if addizionale else base).append(fig)
 
     return {"figure": figure, "titoli": titoli, "figures": base,
