@@ -135,6 +135,7 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99) -> Dict[str, Any
         "roi_su_versamenti": _f(pnl / versamenti) if versamenti else None,
         "capitale_medio_impiegato": _f(capitale_impiegato.mean()),
         "capitale_max_impiegato": _f(capitale_impiegato.max()),
+        **_capitale_al_lavoro(df, capitale_impiegato, pnl),
         "cassa_finale": _f(df["cassa"].iloc[-1]),
         "finanziamento_massimo": _f(-min(0.0, float(df["cassa"].min()))),
         "mesi_a_debito": int((df["cassa"] < -1e-9).sum()),
@@ -216,6 +217,35 @@ def _ciclo_block(df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+def _capitale_al_lavoro(df: pd.DataFrame, impiegato: pd.Series,
+                        pnl: float) -> Dict[str, Any]:
+    """Quanto del conto e' davvero investito, e quanto rende quella parte.
+
+    Il reset annuale reimpiega solo il capitale fisso e lascia in cassa tutti i
+    profitti accumulati: dopo qualche anno una fetta grossa del conto sta ferma.
+    Il CAGR calcolato sul conto intero viene diluito da quella cassa, e non dice
+    piu' se la strategia funziona. Il rendimento sul capitale effettivamente
+    impiegato lo dice.
+
+        rendimento annuo sul capitale impiegato =
+            (1 + utile_netto / capitale_medio_impiegato) ^ (1 / anni) - 1
+    """
+    valore = df["valore_portafoglio"].replace(0, np.nan)
+    quota = (impiegato / valore).replace([np.inf, -np.inf], np.nan)
+    anni = len(df) / MESI_ANNO
+    medio = float(impiegato.mean())
+    roi = None
+    if medio > 0 and anni > 0:
+        base = 1.0 + pnl / medio
+        roi = base ** (1.0 / anni) - 1.0 if base > 0 else None
+    return {
+        "quota_conto_investita": _f(quota.mean()),
+        "quota_conto_investita_finale": _f(quota.iloc[-1]),
+        "cassa_media": _f(df["cassa"].mean()),
+        "rendimento_capitale_impiegato": _f(roi),
+    }
+
+
 def _btd_tetto(df: pd.DataFrame) -> Dict[str, Any]:
     """Quanto il tetto annuo ha vincolato gli acquisti sui cali.
 
@@ -283,7 +313,9 @@ def metrics_table(risultati: Dict[str, Any]) -> pd.DataFrame:
         "var_mensile", "cvar_mensile", "hit_rate", "miglior_mese", "peggior_mese",
         "premi_totali", "intrinseco_totale", "netto_opzioni", "premio_pct_medio",
         "mesi_call_assegnata", "btd_numero", "btd_totale",
-        "capitale_medio_impiegato", "finanziamento_massimo", "mesi_a_debito",
+        "capitale_medio_impiegato", "quota_conto_investita",
+        "rendimento_capitale_impiegato", "cassa_media",
+        "finanziamento_massimo", "mesi_a_debito",
         "btd_prezzo_medio", "btd_quote_comprate", "btd_tagliato_dal_tetto",
         "btd_segnali_saltati", "btd_calo_peggiore_saltato", "anni_con_tetto_esaurito",
         "ciclo_pnl", "ciclo_cagr", "ciclo_volatilita_annua", "ciclo_sharpe",
@@ -323,6 +355,10 @@ ETICHETTE = {
     "btd_numero": "Numero di acquisti BTD",
     "btd_totale": "Capitale investito in BTD",
     "capitale_medio_impiegato": "Capitale medio impiegato",
+    "quota_conto_investita": "Quota media del conto investita",
+    "quota_conto_investita_finale": "Quota del conto investita a fine periodo",
+    "cassa_media": "Cassa media ferma sul conto",
+    "rendimento_capitale_impiegato": "Rendimento annuo sul capitale impiegato",
     "btd_prezzo_medio": "Prezzo medio pagato nei BTD",
     "btd_quote_comprate": "Quote comprate coi BTD",
     "btd_tagliato_dal_tetto": "Acquisti BTD tagliati dal tetto annuo",
@@ -358,6 +394,8 @@ FORMATI = {
     "riduzione_dd_vs_bh": "pct", "extra_cagr_vs_bh": "pct",
     "ciclo_cagr": "pct", "ciclo_volatilita_annua": "pct", "ciclo_max_dd_pct": "pct",
     "riduzione_dd_vs_ciclo": "pct", "extra_cagr_vs_ciclo": "pct", "ciclo_sharpe": "num",
+    "quota_conto_investita": "pct", "quota_conto_investita_finale": "pct",
+    "rendimento_capitale_impiegato": "pct",
     "sharpe": "num", "sortino": "num", "calmar": "num", "bh_sharpe": "num",
     "dd_durata_max_mesi": "int", "mesi_call_assegnata": "int", "btd_numero": "int",
     "mesi_a_debito": "int", "btd_segnali_saltati": "int",
