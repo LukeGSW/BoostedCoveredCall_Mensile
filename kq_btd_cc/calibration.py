@@ -1,442 +1,1015 @@
-"""Calibrazione dello stimatore di premio sui prezzi reali delle opzioni.
+"""Boosted Covered Call — Studio Mensile.
 
-Flusso d'uso:
-  1. si scarica da OptionLAB (o da qualunque altra fonte) un file con i prezzi
-     reali delle call vicine a delta 0.50 sul sottostante di interesse;
-  2. per ogni osservazione il modello ricostruisce il premio partendo dalla sola
-     volatilita' realizzata nota PRIMA di quella data, senza mai vedere la IV;
-  3. si cerca il VRP che minimizza l'errore quadratico fra premio stimato e
-     premio reale, entrambi espressi in frazione dello spot.
+Dashboard Streamlit: capitale fisso annuo coperto da una call mensile venduta a
+delta 0.50, Buy-The-Dip potenziato sui mesi negativi, reset a fine anno.
 
-Il coefficiente calibrato e' l'unico numero che serve per rendere realistico il
-premio su quel sottostante, e finisce nel JSON di export.
+Il premio non e' piu' un numero da indovinare: viene stimato dalla volatilita'
+realizzata del sottostante e puo' essere calibrato sui prezzi reali delle
+opzioni caricati dall'utente.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+import datetime as dt
+import html
+from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
+import streamlit as st
 
-from .pricing import PremiumModel
-from . import vol as volmod
+from kq_btd_cc import CSS, __version__ as VERSIONE
+from kq_btd_cc import calibration as calib
+from kq_btd_cc import charts
+from kq_btd_cc.core import PREFERENZE_DEFAULT, costruisci_config, costruisci_figure
+from kq_btd_cc.data_api import ChiaveMancante, DatiNonDisponibili, carica_serie, ha_api_key
+from kq_btd_cc.engine import (VARIANTS, dettaglio_anno, piano_prossimo_mese,
+                              run_backtest)
+from kq_btd_cc.export import build_export, export_json_bytes, nome_file_export
+from kq_btd_cc.metrics import ETICHETTE, format_value, metrics_table
+from kq_btd_cc.pricing import PremiumModel
+from kq_btd_cc import riferimenti
+from kq_btd_cc.utils import fmt_currency_compact, fmt_num, fmt_pct
+from kq_btd_cc.vol import VOL_MODELS
 
-# Sinonimi accettati per l'auto-riconoscimento delle colonne.
-ALIAS: Dict[str, List[str]] = {
-    "data": ["data", "date", "quote_date", "quotedate", "trade_date", "tradedate",
-             "datetime", "day", "giorno", "data_quotazione"],
-    "spot": ["spot", "underlying", "underlying_price", "underlyingprice", "sottostante",
-             "prezzo_sottostante", "stock_price", "s", "close", "und_price", "prezzo",
-             "under_op", "underop", "under_open"],
-    "strike": ["strike", "k", "strike_price", "strikeprice", "prezzo_esercizio"],
-    "scadenza": ["expiry", "expiration", "exp_date", "expirationdate", "expiry_date",
-                 "scadenza", "data_scadenza", "maturity"],
-    "dte": ["dte", "days_to_expiry", "days", "giorni", "giorni_a_scadenza", "tenor",
-            "days_to_expiration", "t_days"],
-    "delta": ["delta", "call_delta", "delta_call"],
-    "bid": ["bid", "denaro", "bid_price"],
-    "ask": ["ask", "lettera", "ask_price", "offer"],
-    "mid": ["mid", "mid_price", "price", "premio", "premium", "last", "close_option",
-            "option_price", "prezzo_opzione", "mark", "theo"],
-    "tipo": ["type", "tipo", "cp", "call_put", "right", "option_type", "putcall"],
-    "iv": ["iv", "implied_vol", "impliedvolatility", "implied_volatility", "volatilita_implicita"],
+st.set_page_config(
+    page_title="Boosted Covered Call — Studio Mensile",
+    page_icon="📈", layout="wide", initial_sidebar_state="expanded",
+)
+st.markdown(CSS, unsafe_allow_html=True)
+
+PLOTLY_CONFIG = {
+    "displaylogo": False,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+    "toImageButtonOptions": {"format": "png", "scale": 2},
+    "scrollZoom": False,
 }
 
 
-# ----------------------------------------------------------------------------
-# Normalizzazione del file caricato
-# ----------------------------------------------------------------------------
-def _norm(nome: Any) -> str:
-    return str(nome).strip().lower().replace(" ", "_").replace("-", "_")
+def _kwargs_larghezza() -> Dict[str, Any]:
+    """Streamlit ha sostituito use_container_width con width='stretch' dalla 1.49."""
+    try:
+        maggiore, minore = (int(p) for p in st.__version__.split(".")[:2])
+        if (maggiore, minore) >= (1, 49):
+            return {"width": "stretch"}
+    except Exception:
+        pass
+    return {"use_container_width": True}
 
 
-# ----------------------------------------------------------------------------
-# Preset OptionLAB
-# ----------------------------------------------------------------------------
-# L'export di OptionLAB affianca ai trade una seconda serie (Date, DailyEquity)
-# molto piu' lunga: se si lasciasse indovinare la colonna della data,
-# l'abbinamento automatico prenderebbe 'Date' invece di 'Open'. Meglio
-# riconoscere il formato e mappare a mano.
-FIRMA_OPTIONLAB = {"ticket", "symbol", "side", "maturity", "right", "under_op", "open_price"}
+LARGO = _kwargs_larghezza()
 
-MAPPATURA_OPTIONLAB: Dict[str, str] = {
-    "data": "Open",             # data di apertura della posizione
-    "spot": "Under Op",         # sottostante all'apertura
-    "mid": "Open Price",        # premio incassato, per unita' di sottostante
-    "strike": "Strike",
-    "scadenza": "Maturity",
-    "tipo": "Right",
+# Estremi del periodo selezionabile. 1970 copre tutto lo storico che EODHD puo'
+# restituire su indici e azioni, bolla dot-com e crisi del 2008 comprese.
+ANNO_MINIMO = 1970
+OGGI = dt.date.today()
+
+MESI_IT = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+           "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"]
+
+
+def _ultimo_giorno(anno: int, mese: int) -> dt.date:
+    """Ultimo giorno del mese indicato."""
+    return (dt.date(anno + (mese == 12), (mese % 12) + 1, 1) - dt.timedelta(days=1))
+
+
+PREMIO_DEFAULT = PremiumModel()
+
+# Tre sottostanti-tipo per far vedere subito l'effetto della taratura, con la
+# volatilita' misurata sui prezzi reali di quei nomi.
+ESEMPI_VOL = [(0.14, "un indice"), (0.30, "un titolo"), (0.60, "una crypto")]
+
+
+# Configurazioni della stima di volatilita'. La predefinita e' quella risultata
+# migliore sui premi reali di sei sottostanti; le altre due spostano il
+# compromesso fra seguire i cambi di regime e non inseguire il rumore.
+PRESET_VOL: Dict[str, Dict[str, Any]] = {
+    "Predefinita": dict(
+        vol_model="yang_zhang", vol_window=126, vol_long_window=504, vol_blend=0.60,
+        descrizione="Guarda gli ultimi sei mesi, smorzati verso la media di due anni. "
+                    "E' la taratura che ha vinto su tutti e sei i sottostanti testati. "
+                    "Su un cambio di regime se ne accorge in 4 mesi, e il premio si muove "
+                    "in media del 2,7% da un mese all'altro."),
+    "Piu reattiva": dict(
+        vol_model="yang_zhang", vol_window=63, vol_long_window=252, vol_blend=0.85,
+        descrizione="Guarda gli ultimi tre mesi e li smorza poco. Su un cambio di regime "
+                    "se ne accorge in 1 mese, ma il premio balla del 3,6% al mese con "
+                    "salti fino all'80%."),
+    "Piu stabile": dict(
+        vol_model="yang_zhang", vol_window=252, vol_long_window=756, vol_blend=0.40,
+        descrizione="Guarda un anno intero, appoggiandosi molto alla media di tre anni. "
+                    "Premio regolare, si muove del 2,3% al mese e non salta mai oltre il "
+                    "18%, ma su un cambio di regime ci mette 7 mesi ad adeguarsi."),
+    "Manuale": dict(
+        vol_model="yang_zhang", vol_window=126, vol_long_window=504, vol_blend=0.60,
+        descrizione="Tutti i parametri dello stimatore, uno per uno."),
 }
 
 
-def e_optionlab(df: pd.DataFrame) -> bool:
-    return FIRMA_OPTIONLAB.issubset({_norm(c) for c in df.columns})
+def _anteprima_premio(vrp: float, pendenza: float, delta: float) -> str:
+    """Traduce i parametri del modello in premi leggibili."""
+    pm = PremiumModel(vrp=vrp, vrp_slope=pendenza, target_delta=delta)
+    pezzi = []
+    for sigma, nome in ESEMPI_VOL:
+        q = pm.quote(100.0, sigma, 30.0 / 365.0)
+        pezzi.append(f"{q['premium_pct']:.2%} su {nome} ({sigma:.0%} di volatilita)")
+    return "Con questa taratura una call mensile incassa: " + " · ".join(pezzi)
 
 
-def carica_file_opzioni(sorgente: Any, nome: str = "") -> Tuple[pd.DataFrame, bool]:
-    """Legge un CSV/Excel di prezzi opzioni. Ritorna (dataframe, e_optionlab)."""
-    nome = (nome or getattr(sorgente, "name", "") or "").lower()
-    if nome.endswith((".xlsx", ".xls")):
-        df = pd.read_excel(sorgente)
-    else:
-        df = pd.read_csv(sorgente, sep=None, engine="python", decimal=".")
-        if df.shape[1] == 1:                      # separatore non riconosciuto
-            if hasattr(sorgente, "seek"):
-                sorgente.seek(0)
-            df = pd.read_csv(sorgente, sep=";", decimal=".")
-
-    df = df.loc[:, [c for c in df.columns if not str(c).startswith("Unnamed")]]
-    optionlab = e_optionlab(df)
-    if optionlab:
-        # tiene solo le righe che sono davvero operazioni
-        df = df.dropna(subset=[c for c in ("Ticket", "Open", "Under Op", "Open Price")
-                               if c in df.columns])
-        for col in ("Side", "Right"):
-            if col in df.columns:
-                v = df[col].astype(str).str.strip().str.lower()
-                atteso = "sell" if col == "Side" else "call"
-                if v.str.startswith(atteso).any():
-                    df = df[v.str.startswith(atteso)]
-    return df.reset_index(drop=True), optionlab
+# ---------------------------------------------------------------------------
+# Helper di rendering
+# ---------------------------------------------------------------------------
+def grafico(fig, key: Optional[str] = None) -> None:
+    st.plotly_chart(fig, config=PLOTLY_CONFIG, key=key, **LARGO)
 
 
-def suggerisci_mappatura(df: pd.DataFrame) -> Dict[str, Optional[str]]:
-    """Prova ad associare ogni campo richiesto a una colonna del file.
+def kpi_cards(voci: List[Tuple[str, str, str, Optional[str]]]) -> None:
+    """voci: (etichetta, valore, sottotitolo, segno) con segno in {'pos','neg',None}."""
+    blocchi = []
+    for etichetta, valore, sotto, segno in voci:
+        cls = {"pos": " kq-pos", "neg": " kq-neg"}.get(segno or "", "")
+        blocchi.append(
+            f'<div class="kq-kpi"><div class="lab">{html.escape(etichetta)}</div>'
+            f'<div class="val{cls}">{html.escape(valore)}</div>'
+            f'<div class="sub">{html.escape(sotto)}</div></div>'
+        )
+    st.markdown(f'<div class="kq-kpi-row">{"".join(blocchi)}</div>', unsafe_allow_html=True)
 
-    Due passate: prima gli abbinamenti esatti, che si prendono la colonna in
-    esclusiva; poi quelli parziali, ma solo sulle colonne rimaste libere e a
-    livello di parola intera. Senza questa disciplina 'price' finirebbe per
-    agganciare 'underlying_price' e il premio verrebbe letto come lo spot.
+
+def nota(testo: str) -> None:
+    st.markdown(f'<div class="kq-note">{testo}</div>', unsafe_allow_html=True)
+
+
+def segno_di(valore: Optional[float]) -> Optional[str]:
+    if valore is None:
+        return None
+    return "pos" if valore > 0 else ("neg" if valore < 0 else None)
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
+    with st.sidebar:
+        st.markdown("### Parametri")
+
+        with st.expander("Sottostante e periodo", expanded=True):
+            ticker = st.text_input(
+                "Ticker EODHD", value="BTC-USD.CC",
+                help="Formato EODHD: BTC-USD.CC, ETH-USD.CC, SPY.US, AAPL.US...").strip()
+            # Niente st.date_input qui: il calendario di Streamlit elenca nel menu
+            # degli anni una finestra fissa di vent'anni, e ignora min_value. Con
+            # max_value a oggi si ferma al 2007, tagliando fuori la bolla dot-com.
+            # Il motore lavora su barre mensili, quindi anno e mese bastano.
+            c1, c2 = st.columns([1, 1.4])
+            with c1:
+                anno_inizio = st.number_input(
+                    "Anno di inizio", min_value=ANNO_MINIMO, max_value=OGGI.year,
+                    value=2018, step=1, format="%d",
+                    help="Puoi scriverlo direttamente. Lo storico effettivo dipende dal "
+                         "ticker: EODHD parte dalla prima data che ha.")
+            with c2:
+                mese_inizio = st.selectbox(
+                    "Mese di inizio", options=list(range(1, 13)),
+                    format_func=lambda m: MESI_IT[m - 1].capitalize(), index=0)
+            data_inizio = dt.date(int(anno_inizio), int(mese_inizio), 1)
+
+            fine_manuale = st.checkbox(
+                "Imposta una data di fine", value=False,
+                help="Senza questa opzione il backtest arriva all'ultimo dato disponibile.")
+            c3, c4 = st.columns([1, 1.4])
+            with c3:
+                anno_fine = st.number_input(
+                    "Anno di fine", min_value=ANNO_MINIMO, max_value=OGGI.year,
+                    value=OGGI.year, step=1, format="%d", disabled=not fine_manuale)
+            with c4:
+                mese_fine = st.selectbox(
+                    "Mese di fine", options=list(range(1, 13)),
+                    format_func=lambda m: MESI_IT[m - 1].capitalize(),
+                    index=OGGI.month - 1, disabled=not fine_manuale)
+            data_fine = min(OGGI, _ultimo_giorno(int(anno_fine), int(mese_fine)))
+
+            if fine_manuale and data_fine <= data_inizio:
+                st.error("Il periodo di fine deve venire dopo quello di inizio.")
+            st.caption(
+                f"Periodo: {MESI_IT[data_inizio.month - 1]} {data_inizio.year} → "
+                + (f"{MESI_IT[data_fine.month - 1]} {data_fine.year}" if fine_manuale
+                   else "ultimo dato disponibile")
+            )
+
+        with st.expander("Capitale", expanded=True):
+            capitale = st.number_input(
+                "Capitale iniziale — coperto dalla call", value=25_000, step=1_000,
+                min_value=1_000,
+                help="Impiegato all'apertura di gennaio. E' la base su cui si vende la call: "
+                     "su questo si incassa il premio e su questo il rialzo viene tagliato. "
+                     "E' anche il riferimento percentuale del BTD, del boost e del tetto annuo.")
+            capitale_add = st.number_input(
+                "Capitale addizionale annuale — non coperto", value=0, step=1_000, min_value=0,
+                help="Entra una volta sola all'apertura di gennaio, insieme al capitale "
+                     "iniziale, e compra sottostante che resta li' per tutto l'anno. La call "
+                     "NON lo cappa: si tiene tutto il rialzo, e su di esso non si incassa "
+                     "nessun premio. Viene liquidato a fine anno come il resto.")
+            idle = st.slider(
+                "Remunerazione della cassa non impiegata (annua)", 0.0, 6.0, 0.0, 0.25,
+                help="Interesse riconosciuto sulla liquidita' ferma fra un ciclo e l'altro.") / 100.0
+            debito = st.slider(
+                "Costo del saldo a debito (annuo)", 0.0, 15.0, 6.0, 0.5,
+                help="Quando il riacquisto della call a scadenza supera la liquidita' "
+                     "disponibile, il conto va a debito contro le azioni in portafoglio. "
+                     "Questo e' il tasso applicato a quel finanziamento.") / 100.0
+
+        with st.expander("Buy-The-Dip", expanded=True):
+            boost = st.slider(
+                "BTD Boost", 0.0, 15.0, 5.0, 0.5,
+                help="Percentuale del capitale iniziale che si aggiunge a OGNI acquisto BTD, "
+                     "oltre alla quota legata all'entita' del calo. Eredita tutto dal BTD: "
+                     "stesso momento e prezzo di acquisto, quote non coperte dalla call, "
+                     "stesso tetto annuo, liquidazione a fine anno. Da non confondere con il "
+                     "capitale addizionale annuale, che entra invece una volta sola.") / 100.0
+            tetto = st.slider(
+                "Tetto annuo agli acquisti BTD", 25, 400, 100, 25,
+                help="Massimo cumulato acquistabile in un anno, in percentuale del "
+                     "capitale fisso.") / 100.0
+            limite_dd = st.slider(
+                "Sospendi il BTD sotto questo drawdown settimanale", -95.0, -20.0, -90.0, 5.0,
+                help="Se il drawdown settimanale dell'asset e' piu' profondo di questa "
+                     "soglia, l'acquisto del mese viene saltato.") / 100.0
+            esecuzione = st.radio(
+                "Esecuzione dell'acquisto", ["Apertura del mese", "Chiusura del mese"],
+                index=0, horizontal=False,
+                help="Il segnale e' noto alla chiusura del mese precedente: comprare "
+                     "all'apertura e' la scelta eseguibile. La chiusura riproduce il "
+                     "comportamento della versione precedente della dashboard.")
+
+        with st.expander("Premio della call", expanded=True):
+            st.caption("Il premio lo calcola il modello dalla volatilita' del sottostante. "
+                       "Nella maggior parte dei casi qui non c'e' niente da toccare.")
+            delta_target = st.slider(
+                "Delta della call venduta", 0.20, 0.80, 0.50, 0.05,
+                help="0.50 e' la call at-the-money classica della strategia. Piu' basso "
+                     "significa strike piu' lontano: meno premio, ma la call finisce "
+                     "in-the-money molto piu' di rado.")
+
+            cal = st.session_state.get("calibrazione") or {}
+            mod_cal = cal.get("modello_premio") or {}
+            opzioni = ["Predefinito", "Manuale"]
+            if mod_cal:
+                opzioni.insert(1, "Calibrato sui prezzi reali")
+            scelta = st.radio(
+                "Taratura del premio", opzioni, index=1 if mod_cal else 0,
+                help="'Predefinito' usa la taratura misurata su 1.666 vendite reali di call "
+                     "ATM mensili: e' il punto di partenza giusto per un sottostante "
+                     "qualunque. 'Calibrato' compare dopo aver caricato i prezzi reali nella "
+                     "scheda Calibrazione premio. 'Manuale' apre i due parametri del modello.")
+
+            if scelta == "Calibrato sui prezzi reali":
+                vrp = float(mod_cal.get("vrp", PREMIO_DEFAULT.vrp))
+                vrp_slope = float(mod_cal.get("vrp_slope", PREMIO_DEFAULT.vrp_slope))
+                st.caption(f"Da {cal.get('file_sorgente', 'file caricato')} · "
+                           f"{cal.get('metriche', {}).get('n', 0)} osservazioni")
+            elif scelta == "Manuale":
+                vrp = st.slider(
+                    "Livello: quanto la volatilita implicita supera quella realizzata",
+                    0.60, 2.00, PREMIO_DEFAULT.vrp, 0.01,
+                    help="Riferito a un sottostante che oscilla del 20% annuo. Alzarlo "
+                         "aumenta tutti i premi in proporzione. Sopra 1 significa che il "
+                         "mercato paga le opzioni piu' di quanto il sottostante si muova.")
+                vrp_slope = st.slider(
+                    "Pendenza: quanto quel margine cala sui sottostanti volatili",
+                    -0.40, 0.10, PREMIO_DEFAULT.vrp_slope, 0.005,
+                    help="Sui prezzi reali il margine si assottiglia quando il sottostante "
+                         "e' piu' agitato. A zero il rapporto resta uguale per tutti.")
+            else:
+                vrp, vrp_slope = PREMIO_DEFAULT.vrp, PREMIO_DEFAULT.vrp_slope
+
+            st.caption(_anteprima_premio(vrp, vrp_slope, delta_target))
+            c3, c4 = st.columns(2)
+            with c3:
+                tasso = st.number_input("Tasso privo di rischio", value=4.0, step=0.25,
+                                        min_value=-2.0, max_value=25.0) / 100.0
+            with c4:
+                dividendo = st.number_input("Dividend yield", value=0.0, step=0.25,
+                                            min_value=0.0, max_value=25.0) / 100.0
+            strike_atm = st.checkbox(
+                "Strike esattamente allo spot invece che a delta target", value=False,
+                help="A delta 0.50 lo strike sta appena sopra lo spot, tanto piu' quanto "
+                     "e' alta la volatilita'.")
+            applica_cap = st.checkbox(
+                "Applica il cap della covered call", value=True,
+                help="A scadenza la call in-the-money viene riacquistata al valore "
+                     "intrinseco. Disattivandolo si incassano i premi senza pagarne il "
+                     "costo, ed e' esattamente il difetto della versione precedente.")
+
+        with st.expander("Stima della volatilita", expanded=False):
+            st.caption("Quanto il modello guarda indietro per capire di quanto si muove il "
+                       "sottostante. E' l'ingrediente da cui esce il premio.")
+            nome_preset = st.radio(
+                "Memoria del modello", list(PRESET_VOL.keys()), index=0,
+                help="La predefinita e' quella che ha funzionato meglio su tutti e sei i "
+                     "sottostanti di cui ho i prezzi reali delle opzioni. Le altre due "
+                     "spostano il compromesso fra reattivita' e stabilita'.")
+            preset = PRESET_VOL[nome_preset]
+            st.caption(preset["descrizione"])
+
+            if nome_preset == "Manuale":
+                modello_vol = st.selectbox(
+                    "Stimatore", options=list(VOL_MODELS.keys()),
+                    format_func=lambda k: VOL_MODELS[k],
+                    index=list(VOL_MODELS).index("yang_zhang"),
+                    help="Yang-Zhang usa anche massimi, minimi e gap di apertura, quindi "
+                         "stima la volatilita' con molto meno rumore del semplice "
+                         "close-to-close.")
+                finestra = st.slider("Finestra corta (giorni di borsa)", 20, 252, 126, 1)
+                finestra_lunga = st.slider("Finestra lunga (giorni di borsa)", 120, 1260, 504, 6)
+                blend = st.slider(
+                    "Peso della finestra corta", 0.0, 1.0, 0.60, 0.05,
+                    help="A 1 conta solo il periodo recente. Sotto 1 si mescola la finestra "
+                         "lunga, che smorza gli errori di stima.")
+                lam = st.slider("Lambda EWMA", 0.80, 0.99, 0.94, 0.01,
+                                disabled=(modello_vol != "ewma"))
+            else:
+                modello_vol = preset["vol_model"]
+                finestra = preset["vol_window"]
+                finestra_lunga = preset["vol_long_window"]
+                blend = preset["vol_blend"]
+                lam = 0.94
+                st.caption(f"{VOL_MODELS[modello_vol]} · finestra corta "
+                           f"{finestra // 21} mesi, lunga {finestra_lunga // 252} anni · "
+                           f"peso della corta {blend:.0%}")
+
+        with st.expander("Rischio", expanded=False):
+            var_conf = st.slider("Confidenza di VaR e CVaR", 0.90, 0.999, 0.99, 0.005)
+
+        with st.expander("Grafici", expanded=False):
+            log_equity = st.checkbox("Equity in scala logaritmica", value=False)
+            variante_dettaglio = st.selectbox(
+                "Variante nei grafici di dettaglio",
+                options=list(VARIANTS.keys()),
+                format_func=lambda k: VARIANTS[k]["label"], index=1)
+            st.caption("Quali grafici produrre")
+            flags = {
+                "mostra_grafico_1": st.checkbox("Confronto delle equity", value=True),
+                "mostra_grafico_pnl": st.checkbox("Utile netto dei versamenti", value=True),
+                "mostra_grafico_verdetto": st.checkbox("Verdetto contro il Buy & Hold", value=True),
+                "mostra_grafici_abc": st.checkbox("Valore e drawdown per variante", value=True),
+                "mostra_grafico_underwater": st.checkbox("Drawdown a confronto", value=True),
+                "mostra_grafico_5": st.checkbox("Acquisti Buy-The-Dip", value=True),
+                "mostra_grafico_6": st.checkbox("Drawdown settimanale e filtro", value=True),
+                "mostra_grafico_rend_annuali": st.checkbox("Rendimenti annuali", value=True),
+                "mostra_grafico_composizione": st.checkbox("Composizione annuale", value=True),
+                "mostra_grafico_premio": st.checkbox("Premio stimato e volatilita", value=True),
+                "mostra_grafico_strike": st.checkbox("Prezzo e strike", value=True),
+                "mostra_grafici_addizionali": st.checkbox(
+                    "Heatmap, distribuzioni, rolling, rischio/rendimento", value=True),
+            }
+
+        esegui = st.button("Esegui il backtest", type="primary", **LARGO)
+        # Marcatore di versione: serve a capire a colpo d'occhio se il deploy ha
+        # davvero preso il codice nuovo.
+        st.caption(f"kq_btd_cc {VERSIONE} · Streamlit {st.__version__}")
+
+    params: Dict[str, Any] = {
+        "ticker": ticker or "BTC-USD.CC",
+        "start_date": data_inizio.strftime("%Y-%m-%d"),
+        "end_date": data_fine.strftime("%Y-%m-%d") if fine_manuale else None,
+        "capitale_iniziale": float(capitale),
+        "capitale_addizionale": float(capitale_add),
+        "boost_pct": float(boost),
+        "btd_cap_annuo_pct": float(tetto),
+        "btd_dd_weekly_limit": float(limite_dd),
+        "btd_execution": "open" if esecuzione.startswith("Apertura") else "close",
+        "strike_mode": "atm_spot" if strike_atm else "delta",
+        "applica_cap": bool(applica_cap),
+        "vol_model": modello_vol,
+        "vol_window": int(finestra),
+        "vol_long_window": int(finestra_lunga),
+        "vol_blend": float(blend),
+        "ewma_lambda": float(lam),
+        "idle_cash_rate": float(idle),
+        "debit_cash_rate": float(debito),
+        "var_confidence": float(var_conf),
+        "premium_model": PremiumModel(vrp=float(vrp), vrp_slope=float(vrp_slope),
+                                      target_delta=float(delta_target),
+                                      r=float(tasso), q=float(dividendo)),
+    }
+    prefs = {**PREFERENZE_DEFAULT, **flags,
+             "variante_dettaglio": variante_dettaglio, "log_equity": bool(log_equity)}
+    return params, prefs, esegui
+
+
+# ---------------------------------------------------------------------------
+# Esecuzione
+# ---------------------------------------------------------------------------
+def esegui_backtest(params: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = costruisci_config(params)
+    dati = carica_serie(cfg.ticker, cfg.start_date, cfg.end_date)
+    risultato = run_backtest(dati["mensile"],
+                             dati.get("settimanale"), dati.get("giornaliero"), cfg)
+    risultato.setdefault("warnings", []).extend(dati.get("avvisi", []))
+    return risultato
+
+
+def costruisci_export(risultato: Dict[str, Any],
+                      calibrazione: Optional[Dict[str, Any]]) -> Tuple[bytes, str]:
+    """Serializza il backtest una sola volta per esecuzione.
+
+    Le schede vengono ridisegnate a ogni interazione: senza questa memoria il
+    JSON (spesso centinaia di kB) verrebbe ricostruito a ogni click.
     """
-    if e_optionlab(df):
-        base: Dict[str, Optional[str]] = {campo: None for campo in ALIAS}
-        reale = {_norm(c): c for c in df.columns}
-        for campo, colonna in MAPPATURA_OPTIONLAB.items():
-            base[campo] = reale.get(_norm(colonna))
-        return base
-
-    cols = {_norm(c): c for c in df.columns}
-    out: Dict[str, Optional[str]] = {campo: None for campo in ALIAS}
-    usate: set = set()
-
-    for campo, alias in ALIAS.items():
-        for a in alias:
-            if a in cols and cols[a] not in usate:
-                out[campo] = cols[a]
-                usate.add(cols[a])
-                break
-
-    for campo, alias in ALIAS.items():
-        if out[campo] is not None:
-            continue
-        for norm_c, orig in cols.items():
-            if orig in usate:
-                continue
-            parole = set(norm_c.split("_"))
-            if any(a in parole or a == norm_c for a in alias):
-                out[campo] = orig
-                usate.add(orig)
-                break
-    return out
+    chiave = (st.session_state.get("run_id", 0),
+              (calibrazione or {}).get("file_sorgente"),
+              (calibrazione or {}).get("metriche", {}).get("vrp_calibrato"))
+    memo = st.session_state.get("_export_memo")
+    if memo and memo[0] == chiave:
+        return memo[1], memo[2]
+    esporta = build_export(risultato, calibrazione=calibrazione)
+    blob = export_json_bytes(esporta)
+    st.session_state["_export_memo"] = (chiave, blob, esporta["schema"])
+    return blob, esporta["schema"]
 
 
-def prepara_osservazioni(
-    df: pd.DataFrame,
-    mappatura: Dict[str, Optional[str]],
-    solo_call: bool = True,
-    delta_target: float = 0.50,
-    delta_tolleranza: float = 0.10,
-    dayfirst: bool = True,
-) -> pd.DataFrame:
-    """Estrae le colonne utili e costruisce `premio_pct_reale` e `dte`."""
-    if df is None or df.empty:
-        return pd.DataFrame()
+# ---------------------------------------------------------------------------
+# Schede
+# ---------------------------------------------------------------------------
+def scheda_sintesi(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
+    varianti = risultato["varianti"]
+    reinvest = varianti.get("premi_reinvest", {}).get("metrics", {})
+    cash = varianti.get("premi_cash", {}).get("metrics", {})
 
-    def col(nome: str) -> Optional[pd.Series]:
-        c = mappatura.get(nome)
-        return df[c] if c and c in df.columns else None
-
-    out = pd.DataFrame(index=df.index)
-
-    data = col("data")
-    if data is None:
-        raise ValueError("Manca la colonna con la data della quotazione.")
-    out["data"] = pd.to_datetime(data, errors="coerce", dayfirst=dayfirst)
-
-    spot = col("spot")
-    if spot is None:
-        raise ValueError("Manca la colonna con il prezzo del sottostante.")
-    out["spot"] = pd.to_numeric(spot, errors="coerce")
-
-    # Premio: mid esplicito oppure media bid/ask
-    mid, bid, ask = col("mid"), col("bid"), col("ask")
-    if mid is not None:
-        out["premio"] = pd.to_numeric(mid, errors="coerce")
-    elif bid is not None and ask is not None:
-        b = pd.to_numeric(bid, errors="coerce")
-        a = pd.to_numeric(ask, errors="coerce")
-        out["premio"] = (b + a) / 2.0
-    else:
-        raise ValueError("Manca il prezzo dell'opzione (mid oppure bid e ask).")
-
-    # Giorni a scadenza: espliciti oppure dalla data di scadenza
-    dte, scad = col("dte"), col("scadenza")
-    if dte is not None:
-        out["dte"] = pd.to_numeric(dte, errors="coerce")
-    elif scad is not None:
-        out["dte"] = (pd.to_datetime(scad, errors="coerce", dayfirst=dayfirst)
-                      - out["data"]).dt.days
-    else:
-        raise ValueError("Mancano i giorni a scadenza (dte oppure data di scadenza).")
-
-    for opz in ("strike", "delta", "iv"):
-        s = col(opz)
-        out[opz] = pd.to_numeric(s, errors="coerce") if s is not None else np.nan
-
-    tipo = col("tipo")
-    if tipo is not None and solo_call:
-        t = tipo.astype(str).str.strip().str.lower()
-        out = out[t.str.startswith(("c", "call"))]
-
-    out = out.dropna(subset=["data", "spot", "premio", "dte"])
-    out = out[(out["spot"] > 0) & (out["premio"] > 0) & (out["dte"] > 0)]
-
-    # Se il delta c'e', si tengono solo le opzioni vicine al delta obiettivo
-    if out["delta"].notna().any():
-        d = out["delta"].abs()
-        out = out[(d - delta_target).abs() <= delta_tolleranza]
-
-    out["premio_pct_reale"] = out["premio"] / out["spot"]
-    out["T"] = out["dte"] / 365.0
-
-    # Guardia contro una mappatura sbagliata: una call vicina a delta 0.50 con
-    # scadenza breve non vale meta' del sottostante ne' un valore identico su
-    # ogni riga. Meglio fermarsi qui che restituire una calibrazione insensata.
-    if not out.empty:
-        mediana = float(out["premio_pct_reale"].median())
-        if mediana > 0.50:
-            raise ValueError(
-                f"Il premio risulta pari al {mediana:.0%} dello spot: la colonna del prezzo "
-                "dell'opzione sembra puntare al sottostante. Controlla la mappatura."
-            )
-        if len(out) > 3 and float(out["premio_pct_reale"].std(ddof=0)) < 1e-9:
-            raise ValueError(
-                "Il premio in frazione dello spot e' identico su tutte le righe: "
-                "controlla quale colonna e' stata associata al prezzo dell'opzione."
-            )
-    return out.sort_values("data").reset_index(drop=True)
-
-
-# ----------------------------------------------------------------------------
-# Aggancio alla volatilita' realizzata
-# ----------------------------------------------------------------------------
-def aggancia_volatilita(
-    oss: pd.DataFrame,
-    vol_series: pd.Series,
-) -> pd.DataFrame:
-    """Aggiunge a ogni osservazione la vol realizzata nota PRIMA di quella data."""
-    if oss.empty:
-        return oss
-    out = oss.copy()
-    out["sigma_realizzata"] = [
-        volmod.sigma_at(vol_series, d, fallback=np.nan) for d in out["data"]
-    ]
-    return out.dropna(subset=["sigma_realizzata"])
-
-
-# ----------------------------------------------------------------------------
-# Stima e fit
-# ----------------------------------------------------------------------------
-def _premi_stimati(oss: pd.DataFrame, modello: PremiumModel) -> np.ndarray:
-    return np.array([
-        modello.quote(float(r.spot), float(r.sigma_realizzata), float(r.T))["premium_pct"]
-        for r in oss.itertuples()
+    kpi_cards([
+        ("Utile netto — Reinvest", fmt_currency_compact(reinvest.get("pnl_netto")),
+         f"su {fmt_currency_compact(reinvest.get('versamenti_totali'))} versati",
+         segno_di(reinvest.get("pnl_netto"))),
+        ("CAGR — Reinvest", fmt_pct(reinvest.get("cagr")),
+         f"Buy & Hold {fmt_pct(reinvest.get('bh_cagr'))}",
+         segno_di(reinvest.get("extra_cagr_vs_bh"))),
+        ("Max drawdown — Cash", fmt_pct(cash.get("max_dd_pct")),
+         f"Buy & Hold {fmt_pct(cash.get('bh_max_dd_pct'))}",
+         segno_di(cash.get("riduzione_dd_vs_bh"))),
+        ("Sharpe — Cash", fmt_num(cash.get("sharpe")),
+         f"Buy & Hold {fmt_num(cash.get('bh_sharpe'))}", None),
+        ("Premio medio stimato", fmt_pct(cash.get("premio_pct_medio")),
+         "del prezzo del sottostante, al mese", None),
+        ("Call in-the-money", f"{cash.get('mesi_call_assegnata', 0)}/{cash.get('mesi', 0)}",
+         "mesi in cui il cap ha morso", None),
     ])
 
+    dd_cash = cash.get("riduzione_dd_vs_bh")
+    extra_re = reinvest.get("extra_cagr_vs_bh")
+    verdetti = []
+    if dd_cash is not None:
+        verdetti.append(
+            f"con i premi tenuti in cassa il drawdown massimo e' "
+            f"<b>{'inferiore' if dd_cash > 0 else 'superiore'} del {abs(dd_cash):.0%}</b> "
+            f"rispetto al Buy &amp; Hold")
+    if extra_re is not None:
+        verdetti.append(
+            f"reinvestendo i premi il CAGR e' <b>{abs(extra_re):.1%} "
+            f"{'sopra' if extra_re > 0 else 'sotto'}</b> il Buy &amp; Hold")
+    if verdetti:
+        nota("Sul periodo analizzato, " + " e ".join(verdetti) +
+             ". Il confronto e' a parita' di versamenti: il Buy &amp; Hold riceve gli "
+             "stessi soldi negli stessi mesi.")
 
-OBIETTIVI = {
-    "livello": "Allinea il livello medio dei premi (consigliato per il backtest)",
-    "assoluto": "Minimizza l'errore quadratico in punti di spot",
-    "relativo": "Minimizza l'errore quadratico in percentuale del premio",
-}
-
-
-def _errore(oss: pd.DataFrame, modello: PremiumModel, obiettivo: str = "livello") -> float:
-    """Funzione da minimizzare.
-
-    Misurato sui premi reali di sei sottostanti (1.666 operazioni), i tre
-    obiettivi si comportano cosi':
-
-      * "livello"  azzera lo scarto sul premio medio incassato. E' quello che
-        conta in un backtest, dove a fare il risultato e' il totale dei premi.
-      * "assoluto" lascia una sottostima del 7-14% perche' il fit insegue le
-        osservazioni a premio alto, che pesano di piu' in valore assoluto.
-      * "relativo" pesa tutte le osservazioni allo stesso modo ma, con un
-        predittore rumoroso, spinge la stima verso il basso: la sottostima
-        misurata arriva al 20-48%.
-    """
-    stimati = _premi_stimati(oss, modello)
-    reali = oss["premio_pct_reale"].values
-    if obiettivo == "livello":
-        m_s, m_r = float(np.mean(stimati)), float(np.mean(reali))
-        return float((m_s - m_r) ** 2)
-    if obiettivo == "relativo":
-        with np.errstate(divide="ignore", invalid="ignore"):
-            rel = np.where(reali > 0, stimati / reali - 1.0, np.nan)
-        rel = rel[np.isfinite(rel)]
-        return float(np.mean(rel ** 2)) if rel.size else float("inf")
-    return float(np.mean((stimati - reali) ** 2))
+    for chiave in ("verdetto_bh", "confronto_equity", "rendimenti_annuali"):
+        if chiave in figure:
+            grafico(figure[chiave], key=f"sintesi_{chiave}")
 
 
-def calibra_vrp(
-    oss: pd.DataFrame,
-    base: Optional[PremiumModel] = None,
-    vrp_min: float = 0.50,
-    vrp_max: float = 2.50,
-    fit_addendo: bool = False,
-    obiettivo: str = "livello",
-) -> Dict[str, Any]:
-    """Cerca il VRP (e opzionalmente l'addendo) che minimizza l'errore.
-
-    Ricerca su griglia seguita da raffinamento locale: niente scipy, e la
-    funzione obiettivo e' monotona a tratti quindi la griglia basta.
-    """
-    if oss is None or oss.empty or len(oss) < 3:
-        return {"ok": False, "errore": "Servono almeno 3 osservazioni valide."}
-
-    base = base or PremiumModel()
-    kwargs = {k: v for k, v in base.to_dict().items() if k not in ("vrp", "vrp_add")}
-
-    def prova(vrp: float, add: float) -> float:
-        return _errore(oss, PremiumModel(vrp=vrp, vrp_add=add, **kwargs), obiettivo)
-
-    migliore_vrp, migliore_add = base.vrp, base.vrp_add
-    passi_add = np.linspace(-0.15, 0.15, 13) if fit_addendo else np.array([base.vrp_add])
-
-    lo, hi = vrp_min, vrp_max
-    for giro in range(4):                       # griglia via via piu' fitta
-        griglia = np.linspace(lo, hi, 41)
-        best = np.inf
-        for add in passi_add:
-            for v in griglia:
-                e = prova(float(v), float(add))
-                if e < best:
-                    best, migliore_vrp, migliore_add = e, float(v), float(add)
-        passo = (hi - lo) / 40.0
-        lo, hi = max(vrp_min, migliore_vrp - passo * 2), min(vrp_max, migliore_vrp + passo * 2)
-        if hi - lo < 1e-4:
-            break
-
-    modello = PremiumModel(vrp=migliore_vrp, vrp_add=migliore_add, **kwargs)
-    out = {"ok": True, "modello": modello, **valuta(oss, modello)}
-    out["metriche"]["obiettivo"] = obiettivo
-    return out
+def scheda_rischio(figure: Dict[str, Any]) -> None:
+    for chiave in ("pnl_netto", "underwater", "eq_dd_no_premi", "eq_dd_cash",
+                   "eq_dd_reinvest", "rischio_rendimento", "durata_dd"):
+        if chiave in figure:
+            grafico(figure[chiave], key=f"rischio_{chiave}")
 
 
-def valuta(oss: pd.DataFrame, modello: PremiumModel) -> Dict[str, Any]:
-    """Metriche di bonta' del fit, in frazione dello spot."""
-    stimati = _premi_stimati(oss, modello)
-    reali = oss["premio_pct_reale"].values
-    err = stimati - reali
-    ss_res = float(np.sum(err ** 2))
-    ss_tot = float(np.sum((reali - reali.mean()) ** 2))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        mape = float(np.mean(np.abs(err / np.where(reali == 0, np.nan, reali))))
+def scheda_opzione(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
+    fonte = risultato.get("mercato", {}).get("vol_source", "n.d.")
+    cfg = risultato["config"]
+    pm = cfg.get("premium_model", {})
+    nota(
+        f"Premio ricostruito con Black-Scholes su strike a delta "
+        f"{pm.get('target_delta', 0.5):.2f}. La volatilita' implicita e' stimata come "
+        f"volatilita' realizzata &times; VRP, con VRP {pm.get('vrp', 1.0):.2f} al 20% di "
+        f"volatilita e pendenza {pm.get('vrp_slope', 0.0):+.3f}, su dati "
+        f"{html.escape(str(fonte))} e sempre noti <b>prima</b> dell'inizio del mese. "
+        f"L'incasso in valuta e' una percentuale del prezzo corrente, quindi cambia ogni mese."
+    )
+    cash = risultato["varianti"].get("premi_cash", {}).get("metrics", {})
 
-    dettaglio = oss.copy()
-    dettaglio["premio_pct_stimato"] = stimati
-    dettaglio["errore"] = err
-    dettaglio["sigma_implicita_stimata"] = [modello.implied_sigma(s)
-                                            for s in oss["sigma_realizzata"].values]
-    if oss["iv"].notna().any():
-        dettaglio["errore_vol"] = dettaglio["sigma_implicita_stimata"] - oss["iv"]
+    rif = riferimenti.riferimento(str(cfg.get("ticker", "")))
+    verdetto = riferimenti.giudizio(cash.get("premio_pct_medio"), rif)
+    if verdetto:
+        st.info(verdetto)
 
-    metriche = {
-        "n": int(len(oss)),
-        "vrp_calibrato": float(modello.vrp),
-        "vrp_addendo": float(modello.vrp_add),
-        "mae": float(np.mean(np.abs(err))),
-        "rmse": float(np.sqrt(np.mean(err ** 2))),
-        "bias": float(np.mean(err)),
-        "mape": mape if np.isfinite(mape) else None,
-        "r2": float(1.0 - ss_res / ss_tot) if ss_tot > 0 else None,
-        "premio_medio_reale": float(reali.mean()),
-        "premio_medio_stimato": float(stimati.mean()),
-        "periodo_inizio": str(pd.Timestamp(oss["data"].min()).date()),
-        "periodo_fine": str(pd.Timestamp(oss["data"].max()).date()),
-        "dte_medio": float(oss["dte"].mean()),
-    }
-    if "errore_vol" in dettaglio.columns:
-        ev = dettaglio["errore_vol"].dropna()
-        if not ev.empty:
-            metriche["vol_bias"] = float(ev.mean())
-            metriche["vol_mae"] = float(ev.abs().mean())
-            metriche["iv_media_reale"] = float(oss["iv"].dropna().mean())
+    finanziamento = cash.get("finanziamento_massimo") or 0.0
+    if finanziamento > 0.05 * float(cfg.get("capitale_iniziale", 1)):
+        st.warning(
+            f"Il riacquisto delle call in-the-money ha portato il conto a debito fino a "
+            f"{fmt_currency_compact(finanziamento)} per {cash.get('mesi_a_debito', 0)} mesi "
+            f"({fmt_pct(finanziamento / float(cfg.get('capitale_iniziale', 1)), 0)} del capitale "
+            f"fisso). Sul finanziamento e' applicato il "
+            f"{cfg.get('debit_cash_rate', 0):.1%} annuo impostato nella sidebar. "
+            f"Se preferisci evitarlo, tieni i premi in cassa invece di reinvestirli, "
+            f"oppure vendi la call a un delta piu' basso."
+        )
+    for chiave in ("premio", "prezzo_strike", "composizione_annuale"):
+        if chiave in figure:
+            grafico(figure[chiave], key=f"opzione_{chiave}")
 
-    return {"metriche": metriche, "dettaglio": dettaglio}
+    with st.expander("Premi reali misurati su call ATM mensili", expanded=False):
+        st.caption(
+            "Ricavati da 1.666 vendite effettive di call at-the-money a scadenza mensile. "
+            "Servono a verificare che il premio stimato sia nell'ordine di grandezza giusto "
+            "per il sottostante: come si vede, una percentuale fissa non puo' andare bene "
+            "per tutti."
+        )
+        tabella = pd.DataFrame([
+            {"Sottostante": f"{k} — {v['descrizione']}",
+             "Operazioni": v["n"], "Periodo": f"{v['dal']} → {v['al']}",
+             "Premio mediano": fmt_pct(v["premio_mediano"]),
+             "Intervallo 5-95%": f"{v['premio_p05']:.2%} – {v['premio_p95']:.2%}",
+             "Vol. implicita mediana": fmt_pct(v["iv_mediana"], 1)}
+            for k, v in riferimenti.PREMI_REALI.items()
+        ])
+        st.dataframe(tabella, hide_index=True, **LARGO)
 
 
-def confronta_modelli_vol(
-    oss_base: pd.DataFrame,
-    daily: pd.DataFrame,
-    cfg_vol: Dict[str, Any],
-    modelli: Optional[Iterable[str]] = None,
-    base: Optional[PremiumModel] = None,
-    obiettivo: str = "livello",
-) -> pd.DataFrame:
-    """Calibra e valuta ogni stimatore di volatilita': quale descrive meglio i prezzi reali."""
-    modelli = list(modelli or volmod.VOL_MODELS.keys())
-    righe = []
-    for nome in modelli:
-        try:
-            vs = volmod.realized_vol(
-                daily, model=nome,
-                window=int(cfg_vol.get("vol_window", 63)),
-                long_window=int(cfg_vol.get("vol_long_window", 252)),
-                blend=float(cfg_vol.get("vol_blend", 1.0)),
-                ewma_lambda=float(cfg_vol.get("ewma_lambda", 0.94)),
+def scheda_btd(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
+    cfg = risultato["config"]
+    cap0 = float(cfg.get("capitale_iniziale", 0))
+    nota(
+        f"Il segnale scatta quando il mese precedente chiude in negativo. Ogni acquisto vale "
+        f"l'entita' del calo applicata al capitale iniziale <b>piu' il BTD Boost</b>, pari al "
+        f"{cfg.get('boost_pct', 0):.1%} del capitale iniziale "
+        f"({fmt_currency_compact(cap0 * float(cfg.get('boost_pct', 0)))} per ogni acquisto). "
+        f"Il cumulato dell'anno non puo' superare il "
+        f"{cfg.get('btd_cap_annuo_pct', 1):.0%} del capitale iniziale "
+        f"({fmt_currency_compact(cap0 * float(cfg.get('btd_cap_annuo_pct', 1)))}); se il tetto "
+        f"taglia un acquisto, calo e boost si riducono in proporzione. Esecuzione "
+        f"{'all&#39;apertura' if cfg.get('btd_execution') == 'open' else 'alla chiusura'} del mese."
+    )
+    for chiave in ("btd", "dd_settimanale"):
+        if chiave in figure:
+            grafico(figure[chiave], key=f"btd_{chiave}")
+
+
+def scheda_distribuzioni(figure: Dict[str, Any]) -> None:
+    presenti = [c for c in ("heatmap", "distribuzione", "rolling") if c in figure]
+    if not presenti:
+        st.info("Attiva i grafici addizionali nella sidebar per popolare questa scheda.")
+        return
+    for chiave in presenti:
+        grafico(figure[chiave], key=f"distr_{chiave}")
+
+
+COLONNE_MONITOR = [
+    ("mese", "Mese"), ("open", "Apertura"), ("close", "Chiusura"),
+    ("rendimento_mese", "Rend. mese"), ("stato_btd", "Segnale"),
+    ("btd_quota_calo", "BTD dal calo"), ("btd_quota_boost", "BTD dal boost"),
+    ("btd_importo", "BTD totale"), ("btd_residuo_anno", "Residuo tetto"),
+    ("quote_coperte", "Quote coperte"), ("quote_extra", "Quote extra"),
+    ("strike", "Strike venduto"), ("premio_pct", "Premio %"), ("premio", "Premio incassato"),
+    ("intrinseco_pagato", "Intrinseco pagato"), ("netto_opzione", "Netto opzione"),
+    ("cassa", "Cassa"), ("valore_portafoglio", "Valore conto"),
+    ("versamento_mese", "Versato"), ("pnl_netto", "Utile netto"),
+    ("dd_valore", "Drawdown"),
+]
+
+def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
+    dett = dettaglio_anno(risultato, variante)
+    if not dett:
+        st.info("Nessun dato disponibile per questa variante.")
+        return
+    r = dett["riepilogo"]
+    anno = dett["anno"]
+
+    anni = sorted(risultato["varianti"][variante]["monthly"]["anno"].unique())
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        scelto = st.selectbox("Anno", anni, index=len(anni) - 1, key="anno_monitor")
+    if int(scelto) != anno:
+        dett = dettaglio_anno(risultato, variante, int(scelto))
+        r, anno = dett["riepilogo"], dett["anno"]
+
+    st.markdown(f"#### Anno {anno} — {VARIANTS[variante]['label']}")
+    kpi_cards([
+        ("Risultato dell'anno", fmt_currency_compact(r["risultato_anno"]),
+         f"{fmt_pct(r['twr_anno'], 1)} time-weighted", segno_di(r["risultato_anno"])),
+        ("Premi incassati", fmt_currency_compact(r["premi_incassati"]),
+         f"intrinseco pagato {fmt_currency_compact(r['intrinseco_pagato'])}", "pos"),
+        ("Netto opzioni", fmt_currency_compact(r["netto_opzioni"]),
+         f"call ITM in {r['mesi_call_itm']} mesi su {r['mesi_trascorsi']}",
+         segno_di(r["netto_opzioni"])),
+        ("BTD investito", fmt_currency_compact(r["btd_investito"]),
+         f"{r['btd_numero']} acquisti · residuo {fmt_currency_compact(r['btd_residuo'])}", None),
+        ("di cui boost", fmt_currency_compact(r["btd_da_boost"]),
+         f"calo {fmt_currency_compact(r['btd_da_calo'])}", None),
+        ("Valore del conto", fmt_currency_compact(r["valore_conto"]),
+         f"posizione {fmt_currency_compact(r['valore_posizione'])} + cassa "
+         f"{fmt_currency_compact(r['cassa'])}", None),
+    ])
+
+    dettagli = [
+        f"capitale fisso impiegato {fmt_currency_compact(r['capitale_fisso'])}",
+        f"quote coperte {fmt_num(r['quote_coperte'], 4)}",
+        f"quote extra {fmt_num(r['quote_extra'], 4)}",
+        f"tetto annuo BTD {fmt_currency_compact(r['btd_tetto'])}",
+    ]
+    dettagli.insert(1, f"BTD Boost {fmt_currency_compact(r['boost_per_acquisto'])} per acquisto")
+    if r["capitale_addizionale"]:
+        dettagli.insert(1, "capitale addizionale non coperto "
+                           f"{fmt_currency_compact(r['capitale_addizionale'])}")
+    if r["versamenti"]:
+        dettagli.append(f"versato nell'anno {fmt_currency_compact(r['versamenti'])}")
+    if r["segnali_bloccati"]:
+        dettagli.append(f"{r['segnali_bloccati']} segnali bloccati dal filtro")
+    nota(" · ".join(dettagli))
+
+    # ---------------- Piano del mese prossimo ----------------
+    piano = piano_prossimo_mese(risultato, variante)
+    if piano and int(scelto) == int(risultato["varianti"][variante]["monthly"]["anno"].iloc[-1]):
+        st.markdown("#### Cosa fare il mese prossimo")
+        if piano["reset_annuale"]:
+            st.warning(
+                f"**{piano['mese']} — reset annuale.** Liquidare tutta la posizione alla "
+                f"chiusura di dicembre e reimpiegare "
+                f"{fmt_currency_compact(piano['capitale_da_impiegare'])} all'apertura di "
+                f"gennaio. Il tetto BTD e il budget del boost ripartono da zero."
             )
-            oss = aggancia_volatilita(oss_base, vs)
-            if oss.empty or len(oss) < 3:
-                continue
-            fit = calibra_vrp(oss, base=base, obiettivo=obiettivo)
-            if not fit.get("ok"):
-                continue
-            m = fit["metriche"]
-            righe.append({
-                "modello": volmod.VOL_MODELS.get(nome, nome),
-                "chiave": nome,
-                "vrp": m["vrp_calibrato"],
-                "mae": m["mae"],
-                "rmse": m["rmse"],
-                "bias": m["bias"],
-                "mape": m["mape"],
-                "r2": m["r2"],
-                "n": m["n"],
-            })
-        except Exception:
-            continue
-    if not righe:
-        return pd.DataFrame()
-    ordine = "mape" if obiettivo == "relativo" else "rmse"
-    return pd.DataFrame(righe).sort_values(ordine).reset_index(drop=True)
+        else:
+            righe = []
+            if piano["segnale_btd"] and piano["btd_importo"] > 0:
+                righe.append(
+                    f"**Acquisto BTD di {fmt_currency_compact(piano['btd_importo'])}** "
+                    f"all'apertura del mese: {fmt_currency_compact(piano['btd_quota_calo'])} "
+                    f"per il calo del {fmt_pct(abs(piano['rendimento_ultimo_mese']), 1)} e "
+                    f"{fmt_currency_compact(piano['btd_quota_boost'])} di boost. "
+                    f"Dopo l'acquisto resteranno "
+                    f"{fmt_currency_compact(piano['btd_residuo_anno'] - piano['btd_importo'])} "
+                    f"sotto il tetto annuo."
+                )
+            elif piano["btd_bloccato"]:
+                righe.append(
+                    f"Segnale BTD presente ma **bloccato dal filtro**: il drawdown "
+                    f"settimanale e' {fmt_pct(piano['dd_weekly'], 1)}."
+                )
+            elif piano["segnale_btd"]:
+                righe.append("Segnale BTD presente ma **il tetto annuo e' esaurito**.")
+            else:
+                righe.append(
+                    f"**Nessun acquisto BTD**: l'ultimo mese ha chiuso a "
+                    f"{fmt_pct(piano['rendimento_ultimo_mese'], 1)}."
+                )
+            if piano.get("premio_pct"):
+                righe.append(
+                    f"**Vendere la call** su {fmt_num(piano['quote_coperte'], 4)} quote "
+                    f"con strike indicativo {fmt_num(piano['strike_indicativo'], 2)} "
+                    f"({fmt_pct(piano['strike_indicativo'] / piano['prezzo_riferimento'] - 1, 1)} "
+                    f"sopra il prezzo di riferimento {fmt_num(piano['prezzo_riferimento'], 2)}), "
+                    f"premio atteso {fmt_pct(piano['premio_pct'])} dello spot pari a circa "
+                    f"{fmt_currency_compact(piano['premio_atteso'])} "
+                    f"(volatilita stimata {fmt_pct(piano['sigma_stimata'], 1)}, "
+                    f"VRP {fmt_num(piano['vrp_applicato'])})."
+                )
+            st.info(f"**{piano['mese']}** — " + "  \n".join(righe))
+            st.caption(
+                "Segnale e volatilita' sono gia' determinati dalla chiusura del mese scorso. "
+                "Lo strike e le quote si ricalcolano sul prezzo di apertura effettivo."
+            )
+
+    # ---------------- Tabella mese per mese ----------------
+    st.markdown("#### Dettaglio mese per mese")
+    g = dett["mesi"].copy()
+    g["mese"] = [MESI_IT[d.month - 1].capitalize() for d in g.index]
+    g["stato_btd"] = [
+        "bloccato" if (b and s) else ("acquisto" if i > 0 else ("segnale" if s else "—"))
+        for s, b, i in zip(g["segnale_btd"], g["btd_bloccato"], g["btd_importo"])
+    ]
+    vista = pd.DataFrame({etichetta: g[col] for col, etichetta in COLONNE_MONITOR
+                          if col in g.columns})
+    valuta = ["Apertura", "Chiusura", "BTD dal calo", "BTD dal boost", "BTD totale",
+              "Residuo tetto", "Strike venduto", "Premio incassato", "Intrinseco pagato",
+              "Netto opzione", "Cassa", "Valore conto", "Versato", "Utile netto", "Drawdown"]
+    for c in valuta:
+        if c in vista.columns:
+            vista[c] = vista[c].map(lambda v: "—" if pd.isna(v) else f"{v:,.2f}")
+    for c in ("Rend. mese", "Premio %"):
+        if c in vista.columns:
+            vista[c] = vista[c].map(lambda v: "—" if pd.isna(v) else f"{v * 100:,.2f}%")
+    for c in ("Quote coperte", "Quote extra"):
+        if c in vista.columns:
+            vista[c] = vista[c].map(lambda v: f"{v:,.4f}")
+    st.dataframe(vista.set_index("Mese"), **LARGO)
+
+    csv = dett["mesi"].to_csv().encode("utf-8")
+    st.download_button(f"Scarica il {anno} in CSV", data=csv,
+                       file_name=f"boosted_covered_call_{anno}_{variante}.csv",
+                       mime="text/csv")
 
 
-def pacchetto_export(fit: Dict[str, Any], nome_file: Optional[str] = None) -> Dict[str, Any]:
-    """Riduce il risultato della calibrazione a un blocco JSON-safe."""
-    if not fit or not fit.get("ok"):
-        return {}
-    det = fit.get("dettaglio")
-    colonne = ["data", "spot", "strike", "dte", "delta", "premio",
-               "premio_pct_reale", "premio_pct_stimato", "errore",
-               "sigma_realizzata", "sigma_implicita_stimata"]
-    campione = []
-    if isinstance(det, pd.DataFrame) and not det.empty:
-        cols = [c for c in colonne if c in det.columns]
-        campione = det[cols].assign(data=det["data"].dt.strftime("%Y-%m-%d")).to_dict("records")
-    return {
-        "file_sorgente": nome_file,
-        "modello_premio": fit["modello"].to_dict() if fit.get("modello") else None,
-        "metriche": fit.get("metriche", {}),
-        "osservazioni": campione,
-    }
+def scheda_dati(risultato: Dict[str, Any], calibrazione: Optional[Dict[str, Any]]) -> None:
+    st.markdown("#### Metriche a confronto")
+    tb = metrics_table(risultato["varianti"])
+    if not tb.empty:
+        vista = pd.DataFrame(
+            {col: [format_value(k, tb.loc[k, col]) for k in tb.index] for col in tb.columns},
+            index=[ETICHETTE.get(k, k) for k in tb.index],
+        )
+        st.dataframe(vista, **LARGO)
+
+    st.markdown("#### Dettaglio per anno")
+    scelta = st.selectbox("Variante", list(VARIANTS.keys()),
+                          format_func=lambda k: VARIANTS[k]["label"], index=1, key="anno_var")
+    y = risultato["varianti"][scelta]["yearly"]
+    if not y.empty:
+        vista_y = y.copy()
+        for c in ("rendimento_sottostante", "twr_anno"):
+            vista_y[c] = vista_y[c].map(lambda v: fmt_pct(v, 1))
+        for c in ("premi_incassati", "intrinseco_pagato", "netto_opzioni", "btd_investito",
+                  "versamenti", "capitale_medio_impiegato", "valore_fine_anno", "risultato_anno"):
+            vista_y[c] = vista_y[c].map(lambda v: f"${v:,.0f}")
+        vista_y.columns = [c.replace("_", " ").capitalize() for c in vista_y.columns]
+        st.dataframe(vista_y, **LARGO)
+
+    st.markdown("#### Serie mensile")
+    mdf = risultato["varianti"][scelta]["monthly"]
+    colonne = st.multiselect(
+        "Colonne", options=list(mdf.columns), key="col_mensili",
+        default=[c for c in ["close", "rendimento_mese", "segnale_btd", "btd_importo",
+                             "sigma_stimata", "strike", "premio_pct", "premio",
+                             "intrinseco_pagato", "valore_portafoglio", "versamenti_cum",
+                             "pnl_netto", "twr_mese"] if c in mdf.columns])
+    if colonne:
+        st.dataframe(mdf[colonne], height=420, **LARGO)
+
+    st.markdown("#### Scarica il backtest")
+    nota("Il file JSON contiene parametri, equity, serie mensile completa di ogni variante, "
+         "tabelle annuali, flussi di cassa, metriche, volatilita' stimata, la calibrazione "
+         "del premio e un dizionario che spiega ogni campo.")
+    blob, schema = costruisci_export(risultato, calibrazione)
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        st.download_button(
+            "Scarica JSON", data=blob, file_name=nome_file_export(risultato["config"]),
+            mime="application/json", type="primary", **LARGO)
+    with c2:
+        st.caption(f"{len(blob) / 1024:,.0f} kB — schema {schema}")
+
+
+def scheda_calibrazione(risultato: Optional[Dict[str, Any]], params: Dict[str, Any]) -> None:
+    st.markdown("#### Calibrazione del premio sui prezzi reali")
+    nota(
+        "Carica un file con i prezzi reali delle call vicine al delta obiettivo sul "
+        "sottostante che stai studiando. Per ogni riga il modello ricostruisce il premio "
+        "usando <b>solo</b> la volatilita' realizzata nota prima di quella data, senza mai "
+        "vedere la volatilita' implicita, e cerca il coefficiente che minimizza l'errore. "
+        "Servono almeno: data, prezzo del sottostante, prezzo dell'opzione (mid oppure bid "
+        "e ask) e giorni a scadenza. Delta, strike e IV, se ci sono, vengono usati."
+    )
+    file = st.file_uploader("File dei prezzi reali", type=["csv", "txt", "xlsx"],
+                            key="file_calibrazione")
+    if file is None:
+        return
+    if risultato is None:
+        st.warning("Esegui prima il backtest: serve la volatilita' del sottostante.")
+        return
+
+    try:
+        grezzo, e_optionlab = calib.carica_file_opzioni(file, nome=file.name)
+    except Exception as e:
+        st.error(f"File non leggibile: {e}")
+        return
+    if e_optionlab:
+        st.success(
+            "Riconosciuto un export OptionLAB: le colonne sono associate automaticamente "
+            "(data di apertura, sottostante all'apertura, premio incassato) e sono state "
+            "tenute solo le vendite di call."
+        )
+
+    st.caption(f"{len(grezzo):,} righe · colonne: {', '.join(map(str, grezzo.columns[:14]))}"
+               + (" ..." if len(grezzo.columns) > 14 else ""))
+    with st.expander("Anteprima", expanded=False):
+        st.dataframe(grezzo.head(20), **LARGO)
+
+    suggerita = calib.suggerisci_mappatura(grezzo)
+    st.markdown("**Associazione delle colonne**")
+    opzioni = ["(nessuna)"] + [str(c) for c in grezzo.columns]
+    campi = ["data", "spot", "mid", "bid", "ask", "dte", "scadenza", "strike", "delta", "tipo", "iv"]
+    mappatura: Dict[str, Optional[str]] = {}
+    colonne_ui = st.columns(4)
+    for i, campo in enumerate(campi):
+        with colonne_ui[i % 4]:
+            corrente = suggerita.get(campo)
+            idx = opzioni.index(str(corrente)) if corrente and str(corrente) in opzioni else 0
+            scelta = st.selectbox(campo, opzioni, index=idx, key=f"map_{campo}")
+            mappatura[campo] = None if scelta == "(nessuna)" else scelta
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        tolleranza = st.slider("Tolleranza sul delta", 0.02, 0.30, 0.10, 0.01)
+        obiettivo = st.selectbox(
+            "Obiettivo della calibrazione", list(calib.OBIETTIVI.keys()),
+            format_func=lambda k: calib.OBIETTIVI[k], index=0,
+            help="Misurato su 1.666 premi reali: 'livello' azzera lo scarto sul premio "
+                 "medio incassato, che e' cio' che determina il risultato di un backtest; "
+                 "gli altri due riducono di poco l'errore mese per mese ma lasciano una "
+                 "sottostima sistematica dal 10% al 27%.")
+    with c2:
+        fit_add = st.checkbox("Calibra anche un addendo di volatilita", value=False)
+    with c3:
+        confronta = st.checkbox("Confronta tutti gli stimatori di volatilita", value=True)
+
+    base = PremiumModel(**{**params["premium_model"].to_dict(), "vrp_add": 0.0})
+
+    if st.button("Calibra", type="primary"):
+        try:
+            oss = calib.prepara_osservazioni(
+                grezzo, mappatura,
+                delta_target=float(params["premium_model"].target_delta),
+                delta_tolleranza=float(tolleranza))
+        except ValueError as e:
+            st.error(str(e))
+            return
+        if oss.empty:
+            st.error("Nessuna osservazione valida dopo i filtri. Allarga la tolleranza sul "
+                     "delta o controlla l'associazione delle colonne.")
+            return
+
+        oss = calib.aggancia_volatilita(oss, risultato["mercato"]["vol"])
+        if len(oss) < 3:
+            st.error("Meno di tre osservazioni hanno una volatilita' realizzata disponibile. "
+                     "Verifica che il periodo del file ricada dentro quello del backtest.")
+            return
+
+        fit = calib.calibra_vrp(oss, base=base, fit_addendo=fit_add,
+                                obiettivo=obiettivo)
+        if not fit.get("ok"):
+            st.error(fit.get("errore", "Calibrazione fallita."))
+            return
+
+        # Il risultato vive in sessione: le schede si ridisegnano a ogni click e
+        # senza questo la calibrazione sparirebbe alla prima interazione.
+        st.session_state["fit_calibrazione"] = fit
+        st.session_state["fit_osservazioni"] = oss
+        st.session_state["calibrazione"] = calib.pacchetto_export(
+            fit, nome_file=file.name, ticker=str(params.get("ticker", "")))
+
+    fit = st.session_state.get("fit_calibrazione")
+    if not fit:
+        return
+    oss = st.session_state.get("fit_osservazioni")
+    m = fit["metriche"]
+    kpi_cards([
+        ("VRP calibrato", f"{m['vrp_calibrato']:.3f}", f"su {m['n']} osservazioni", None),
+        ("Errore medio", f"{m['mae'] * 100:.2f} pt", "punti percentuali di spot", None),
+        ("Errore quadratico", f"{m['rmse'] * 100:.2f} pt", "RMSE in punti di spot", None),
+        ("Distorsione", f"{m['bias'] * 100:+.2f} pt",
+         "positiva = il modello sovrastima", segno_di(-abs(m['bias']))),
+        ("R quadro", f"{m['r2']:.3f}" if m.get("r2") is not None else "n.d.",
+         "quota di variabilita spiegata", None),
+        ("Premio medio reale", f"{m['premio_medio_reale']:.2%}",
+         f"stimato {m['premio_medio_stimato']:.2%}", None),
+        ("Scarto sul livello",
+         f"{m['premio_medio_stimato'] / m['premio_medio_reale'] - 1:+.1%}",
+         "quanto il backtest incassa in piu o in meno", None),
+    ])
+    grafico(charts.fig_calibrazione(fit), key="calib_fig")
+
+    if confronta and oss is not None:
+        st.markdown("**Quale stimatore di volatilita descrive meglio i prezzi reali**")
+        tabella = calib.confronta_modelli_vol(
+            oss.drop(columns=["sigma_realizzata"]),
+            risultato.get("_giornaliero"), risultato["config"], base=base,
+            obiettivo=obiettivo)
+        if tabella is not None and not tabella.empty:
+            vista = tabella.copy()
+            vista["vrp"] = vista["vrp"].map(lambda v: f"{v:.3f}")
+            for c in ("mae", "rmse", "bias"):
+                vista[c] = vista[c].map(lambda v: f"{v * 100:+.3f} pt")
+            vista["r2"] = vista["r2"].map(lambda v: f"{v:.3f}")
+            if "mape" in vista.columns:
+                vista["mape"] = vista["mape"].map(lambda v: f"{v:.0%}")
+            vista = vista.rename(columns={
+                "modello": "Stimatore", "vrp": "VRP", "mae": "MAE", "rmse": "RMSE",
+                "bias": "Distorsione", "mape": "Errore medio", "r2": "R quadro", "n": "Oss."})
+            st.dataframe(vista.drop(columns=["chiave"]), hide_index=True,
+                         **LARGO)
+            st.caption("Ordinati per errore quadratico crescente: il primo e' quello da "
+                       "impostare nella sidebar.")
+        else:
+            st.caption("Confronto non disponibile: servono i dati giornalieri del sottostante.")
+
+    sigma_med = float(oss["sigma_realizzata"].median()) if oss is not None else None
+    st.success(
+        "**Calibrazione pronta.** Nella sidebar, sotto *Premio della call*, scegli "
+        "**Calibrato sui prezzi reali** e rilancia il backtest: i parametri vengono presi "
+        "da qui, non c'e' niente da ricopiare a mano. La calibrazione finisce anche nel JSON "
+        "di export."
+        + (f" Alla volatilita mediana di questo sottostante ({sigma_med:.0%}) il rapporto "
+           f"applicato e' {fit['modello'].vrp_effettivo(sigma_med):.3f}." if sigma_med else "")
+    )
+    st.caption(_anteprima_premio(fit["modello"].vrp, fit["modello"].vrp_slope,
+                                 fit["modello"].target_delta))
+
+
+# ---------------------------------------------------------------------------
+# Corpo
+# ---------------------------------------------------------------------------
+st.title("Boosted Covered Call — Studio Mensile")
+st.caption("Capitale fisso annuo coperto da una call mensile a delta 0.50, Buy-The-Dip "
+           "potenziato sui mesi negativi, liquidazione e reset a fine anno.")
+
+params, prefs, esegui = sidebar()
+
+if not ha_api_key():
+    st.warning(
+        "Manca la chiave EODHD. Su Streamlit Cloud vai in Settings → Secrets e aggiungi "
+        "`EODHD_API_KEY = \"la-tua-chiave\"`; in locale puoi usare la variabile d'ambiente "
+        "omonima oppure `.streamlit/secrets.toml`."
+    )
+    st.stop()
+
+if esegui:
+    with st.spinner("Scarico i dati ed eseguo il backtest…"):
+        try:
+            st.session_state["risultato"] = esegui_backtest(params)
+            st.session_state["params"] = params
+            st.session_state["run_id"] = st.session_state.get("run_id", 0) + 1
+        except (ChiaveMancante, DatiNonDisponibili) as e:
+            st.session_state.pop("risultato", None)
+            st.error(str(e))
+        except Exception as e:
+            st.session_state.pop("risultato", None)
+            st.error("Errore durante l'esecuzione del backtest.")
+            st.exception(e)
+
+risultato = st.session_state.get("risultato")
+
+if risultato is None:
+    st.info("Imposta i parametri nella sidebar e premi **Esegui il backtest**.")
+    with st.expander("Cosa fa questa strategia", expanded=True):
+        st.markdown(
+            """
+Ogni anno si impiega lo **stesso capitale fisso**, deciso in partenza, comprando il
+sottostante all'apertura di gennaio. Su quelle quote si vende ogni mese una call a
+delta 0.50 con scadenza a fine mese: si incassa un premio pari a una percentuale del
+prezzo corrente e, se a scadenza la call e' in-the-money, la si riacquista al valore
+intrinseco. E' cosi' che il cap sull'upside costa davvero, mese dopo mese.
+
+Quando il sottostante chiude un mese in negativo scatta il **Buy-The-Dip**: si investe
+l'entita' del calo applicata al capitale fisso, maggiorata di un boost, fino a un tetto
+annuo. Queste quote extra restano scoperte.
+
+A fine anno si **liquida tutto** e si riparte dallo stesso capitale fisso. L'eccedenza
+resta come cassa; se manca capitale si versa la differenza — e quella e' un versamento,
+non un utile. Ogni euro entrato dall'esterno viene tracciato, cosi' l'utile mostrato e'
+al netto dei versamenti e i rendimenti sono time-weighted.
+            """
+        )
+    st.stop()
+
+if not risultato.get("ok"):
+    st.error(risultato.get("errore", "Backtest non riuscito."))
+    st.stop()
+
+for avviso in risultato.get("warnings", []):
+    st.warning(avviso)
+
+with st.spinner("Costruisco i grafici…"):
+    costruite = costruisci_figure(
+        risultato, prefs,
+        variante_dettaglio=str(prefs.get("variante_dettaglio", "premi_cash")),
+        log_equity=bool(prefs.get("log_equity", False)))
+figure = costruite["figure"]
+for errore in costruite["errori"]:
+    st.warning(f"Grafico non disponibile — {errore}")
+
+cfg = risultato["config"]
+periodo_a = risultato["varianti"]["premi_cash"]["metrics"].get("periodo_inizio", "—")
+periodo_b = risultato["varianti"]["premi_cash"]["metrics"].get("periodo_fine", "—")
+st.caption(
+    f"**{html.escape(str(cfg.get('ticker')))}** · dal {periodo_a} al {periodo_b} · "
+    f"capitale fisso ${cfg.get('capitale_iniziale', 0):,.0f} · "
+    f"boost {cfg.get('boost_pct', 0):.1%} · "
+    f"volatilita da {risultato['mercato'].get('vol_source', 'n.d.')}"
+    + ("" if cfg.get("applica_cap") else " · **cap della call disattivato**")
+)
+
+schede = st.tabs(["Sintesi", "Anno in corso", "Equity e rischio", "Opzione e premio",
+                  "Buy-The-Dip", "Distribuzioni", "Dati ed export", "Calibrazione premio"])
+with schede[0]:
+    scheda_sintesi(risultato, figure)
+with schede[1]:
+    scheda_anno_corrente(risultato, str(prefs.get("variante_dettaglio", "premi_cash")))
+with schede[2]:
+    scheda_rischio(figure)
+with schede[3]:
+    scheda_opzione(risultato, figure)
+with schede[4]:
+    scheda_btd(risultato, figure)
+with schede[5]:
+    scheda_distribuzioni(figure)
+with schede[6]:
+    scheda_dati(risultato, st.session_state.get("calibrazione"))
+with schede[7]:
+    scheda_calibrazione(risultato, params)
