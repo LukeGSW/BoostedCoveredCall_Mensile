@@ -3,10 +3,12 @@
 La cadenza decide solo la lunghezza del passo: mensile (l'originale) o
 settimanale, dove tutto quello che si fa a fine mese si fa a fine settimana.
 Il ciclo annuale — capitale deciso a gennaio, tutto liquidato a dicembre — resta
-identico nelle due versioni.
+identico nelle due versioni. Le decisioni stanno sulla griglia del periodo, ma il
+conto e' valorizzato ogni giorno di borsa: e' li' che si vedono i drawdown veri.
 
 Moduli:
   cadenza     mensile o settimanale: periodi per anno e vocabolario dei testi
+  giornaliero rivalutazione giorno per giorno del conto (drawdown veri)
   data_api    download EODHD (mensile/settimanale/giornaliero) con cache
   vol         stimatori di volatilita' realizzata da OHLC
   pricing     Black-Scholes senza scipy e stima del premio a delta 0.50
@@ -34,4 +36,4 @@ __all__ = [
     "build_export", "export_json_bytes",
 ]
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
