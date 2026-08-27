@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import datetime as dt
 import html
-import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -70,6 +69,49 @@ MESI_IT = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
 def _ultimo_giorno(anno: int, mese: int) -> dt.date:
     """Ultimo giorno del mese indicato."""
     return (dt.date(anno + (mese == 12), (mese % 12) + 1, 1) - dt.timedelta(days=1))
+
+
+PREMIO_DEFAULT = PremiumModel()
+
+# Tre sottostanti-tipo per far vedere subito l'effetto della taratura, con la
+# volatilita' misurata sui prezzi reali di quei nomi.
+ESEMPI_VOL = [(0.14, "un indice"), (0.30, "un titolo"), (0.60, "una crypto")]
+
+
+# Configurazioni della stima di volatilita'. La predefinita e' quella risultata
+# migliore sui premi reali di sei sottostanti; le altre due spostano il
+# compromesso fra seguire i cambi di regime e non inseguire il rumore.
+PRESET_VOL: Dict[str, Dict[str, Any]] = {
+    "Predefinita": dict(
+        vol_model="yang_zhang", vol_window=126, vol_long_window=504, vol_blend=0.60,
+        descrizione="Guarda gli ultimi sei mesi, smorzati verso la media di due anni. "
+                    "E' la taratura che ha vinto su tutti e sei i sottostanti testati. "
+                    "Su un cambio di regime se ne accorge in 4 mesi, e il premio si muove "
+                    "in media del 2,7% da un mese all'altro."),
+    "Piu reattiva": dict(
+        vol_model="yang_zhang", vol_window=63, vol_long_window=252, vol_blend=0.85,
+        descrizione="Guarda gli ultimi tre mesi e li smorza poco. Su un cambio di regime "
+                    "se ne accorge in 1 mese, ma il premio balla del 3,6% al mese con "
+                    "salti fino all'80%."),
+    "Piu stabile": dict(
+        vol_model="yang_zhang", vol_window=252, vol_long_window=756, vol_blend=0.40,
+        descrizione="Guarda un anno intero, appoggiandosi molto alla media di tre anni. "
+                    "Premio regolare, si muove del 2,3% al mese e non salta mai oltre il "
+                    "18%, ma su un cambio di regime ci mette 7 mesi ad adeguarsi."),
+    "Manuale": dict(
+        vol_model="yang_zhang", vol_window=126, vol_long_window=504, vol_blend=0.60,
+        descrizione="Tutti i parametri dello stimatore, uno per uno."),
+}
+
+
+def _anteprima_premio(vrp: float, pendenza: float, delta: float) -> str:
+    """Traduce i parametri del modello in premi leggibili."""
+    pm = PremiumModel(vrp=vrp, vrp_slope=pendenza, target_delta=delta)
+    pezzi = []
+    for sigma, nome in ESEMPI_VOL:
+        q = pm.quote(100.0, sigma, 30.0 / 365.0)
+        pezzi.append(f"{q['premium_pct']:.2%} su {nome} ({sigma:.0%} di volatilita)")
+    return "Con questa taratura una call mensile incassa: " + " · ".join(pezzi)
 
 
 # ---------------------------------------------------------------------------
@@ -199,29 +241,47 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                      "comportamento della versione precedente della dashboard.")
 
         with st.expander("Premio della call", expanded=True):
-            st.caption("Il premio viene calcolato dalla volatilita' del sottostante, "
-                       "non impostato a mano.")
+            st.caption("Il premio lo calcola il modello dalla volatilita' del sottostante. "
+                       "Nella maggior parte dei casi qui non c'e' niente da toccare.")
             delta_target = st.slider(
                 "Delta della call venduta", 0.20, 0.80, 0.50, 0.05,
-                help="0.50 e' la call at-the-money classica della strategia.")
-            vrp = st.slider(
-                "Volatility risk premium a volatilita 20%", 0.60, 2.00, 0.96, 0.01,
-                help="Di quanto la volatilita' implicita eccede quella realizzata, misurato "
-                     "su un sottostante che oscilla del 20% annuo. Il default viene da 1.630 "
-                     "vendite reali di call ATM mensili su sei sottostanti. Il livello dipende "
-                     "anche dallo stimatore di volatilita' scelto qui sotto: la scheda "
-                     "Calibrazione premio lo misura sul tuo sottostante.")
-            vrp_slope = st.slider(
-                "Pendenza del VRP rispetto alla volatilita", -0.40, 0.10, -0.125, 0.005,
-                help="Sui prezzi reali il premio al rischio si riduce quando il sottostante "
-                     "e' piu' volatile: circa 1.03 al 12% di volatilita', 0.83 al 60%. "
-                     "Modellarlo riduce di un terzo l'errore sui ticker per cui non si hanno "
-                     "prezzi reali. A zero il VRP torna costante.")
-            st.caption(
-                f"VRP applicato: {max(0.3, vrp + vrp_slope * math.log(0.12/0.20)):.2f} "
-                f"al 12% di volatilita · {vrp:.2f} al 20% · "
-                f"{max(0.3, vrp + vrp_slope * math.log(0.60/0.20)):.2f} al 60%"
-            )
+                help="0.50 e' la call at-the-money classica della strategia. Piu' basso "
+                     "significa strike piu' lontano: meno premio, ma la call finisce "
+                     "in-the-money molto piu' di rado.")
+
+            cal = st.session_state.get("calibrazione") or {}
+            mod_cal = cal.get("modello_premio") or {}
+            opzioni = ["Predefinito", "Manuale"]
+            if mod_cal:
+                opzioni.insert(1, "Calibrato sui prezzi reali")
+            scelta = st.radio(
+                "Taratura del premio", opzioni, index=1 if mod_cal else 0,
+                help="'Predefinito' usa la taratura misurata su 1.666 vendite reali di call "
+                     "ATM mensili: e' il punto di partenza giusto per un sottostante "
+                     "qualunque. 'Calibrato' compare dopo aver caricato i prezzi reali nella "
+                     "scheda Calibrazione premio. 'Manuale' apre i due parametri del modello.")
+
+            if scelta == "Calibrato sui prezzi reali":
+                vrp = float(mod_cal.get("vrp", PREMIO_DEFAULT.vrp))
+                vrp_slope = float(mod_cal.get("vrp_slope", PREMIO_DEFAULT.vrp_slope))
+                st.caption(f"Da {cal.get('file_sorgente', 'file caricato')} · "
+                           f"{cal.get('metriche', {}).get('n', 0)} osservazioni")
+            elif scelta == "Manuale":
+                vrp = st.slider(
+                    "Livello: quanto la volatilita implicita supera quella realizzata",
+                    0.60, 2.00, PREMIO_DEFAULT.vrp, 0.01,
+                    help="Riferito a un sottostante che oscilla del 20% annuo. Alzarlo "
+                         "aumenta tutti i premi in proporzione. Sopra 1 significa che il "
+                         "mercato paga le opzioni piu' di quanto il sottostante si muova.")
+                vrp_slope = st.slider(
+                    "Pendenza: quanto quel margine cala sui sottostanti volatili",
+                    -0.40, 0.10, PREMIO_DEFAULT.vrp_slope, 0.005,
+                    help="Sui prezzi reali il margine si assottiglia quando il sottostante "
+                         "e' piu' agitato. A zero il rapporto resta uguale per tutti.")
+            else:
+                vrp, vrp_slope = PREMIO_DEFAULT.vrp, PREMIO_DEFAULT.vrp_slope
+
+            st.caption(_anteprima_premio(vrp, vrp_slope, delta_target))
             c3, c4 = st.columns(2)
             with c3:
                 tasso = st.number_input("Tasso privo di rischio", value=4.0, step=0.25,
@@ -240,17 +300,41 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                      "costo, ed e' esattamente il difetto della versione precedente.")
 
         with st.expander("Stima della volatilita", expanded=False):
-            modello_vol = st.selectbox(
-                "Stimatore", options=list(VOL_MODELS.keys()),
-                format_func=lambda k: VOL_MODELS[k], index=list(VOL_MODELS).index("yang_zhang"))
-            finestra = st.slider("Finestra corta (giorni)", 20, 180, 63, 1)
-            finestra_lunga = st.slider("Finestra lunga (giorni)", 120, 756, 252, 6)
-            blend = st.slider(
-                "Peso della finestra corta", 0.0, 1.0, 0.70, 0.05,
-                help="Sotto 1 si mescola la finestra lunga, che tiene conto del ritorno "
-                     "della volatilita' verso la sua media.")
-            lam = st.slider("Lambda EWMA", 0.80, 0.99, 0.94, 0.01,
-                            disabled=(modello_vol != "ewma"))
+            st.caption("Quanto il modello guarda indietro per capire di quanto si muove il "
+                       "sottostante. E' l'ingrediente da cui esce il premio.")
+            nome_preset = st.radio(
+                "Memoria del modello", list(PRESET_VOL.keys()), index=0,
+                help="La predefinita e' quella che ha funzionato meglio su tutti e sei i "
+                     "sottostanti di cui ho i prezzi reali delle opzioni. Le altre due "
+                     "spostano il compromesso fra reattivita' e stabilita'.")
+            preset = PRESET_VOL[nome_preset]
+            st.caption(preset["descrizione"])
+
+            if nome_preset == "Manuale":
+                modello_vol = st.selectbox(
+                    "Stimatore", options=list(VOL_MODELS.keys()),
+                    format_func=lambda k: VOL_MODELS[k],
+                    index=list(VOL_MODELS).index("yang_zhang"),
+                    help="Yang-Zhang usa anche massimi, minimi e gap di apertura, quindi "
+                         "stima la volatilita' con molto meno rumore del semplice "
+                         "close-to-close.")
+                finestra = st.slider("Finestra corta (giorni di borsa)", 20, 252, 126, 1)
+                finestra_lunga = st.slider("Finestra lunga (giorni di borsa)", 120, 1260, 504, 6)
+                blend = st.slider(
+                    "Peso della finestra corta", 0.0, 1.0, 0.60, 0.05,
+                    help="A 1 conta solo il periodo recente. Sotto 1 si mescola la finestra "
+                         "lunga, che smorza gli errori di stima.")
+                lam = st.slider("Lambda EWMA", 0.80, 0.99, 0.94, 0.01,
+                                disabled=(modello_vol != "ewma"))
+            else:
+                modello_vol = preset["vol_model"]
+                finestra = preset["vol_window"]
+                finestra_lunga = preset["vol_long_window"]
+                blend = preset["vol_blend"]
+                lam = 0.94
+                st.caption(f"{VOL_MODELS[modello_vol]} · finestra corta "
+                           f"{finestra // 21} mesi, lunga {finestra_lunga // 252} anni · "
+                           f"peso della corta {blend:.0%}")
 
         with st.expander("Rischio", expanded=False):
             var_conf = st.slider("Confidenza di VaR e CVaR", 0.90, 0.999, 0.99, 0.005)
@@ -767,7 +851,8 @@ def scheda_calibrazione(risultato: Optional[Dict[str, Any]], params: Dict[str, A
         # senza questo la calibrazione sparirebbe alla prima interazione.
         st.session_state["fit_calibrazione"] = fit
         st.session_state["fit_osservazioni"] = oss
-        st.session_state["calibrazione"] = calib.pacchetto_export(fit, nome_file=file.name)
+        st.session_state["calibrazione"] = calib.pacchetto_export(
+            fit, nome_file=file.name, ticker=str(params.get("ticker", "")))
 
     fit = st.session_state.get("fit_calibrazione")
     if not fit:
@@ -815,15 +900,16 @@ def scheda_calibrazione(risultato: Optional[Dict[str, Any]], params: Dict[str, A
             st.caption("Confronto non disponibile: servono i dati giornalieri del sottostante.")
 
     sigma_med = float(oss["sigma_realizzata"].median()) if oss is not None else None
-    effettivo = fit["modello"].vrp_effettivo(sigma_med) if sigma_med else None
     st.success(
-        f"**VRP calibrato: {m['vrp_calibrato']:.3f}** — e' il valore da mettere nello slider "
-        f"*Volatility risk premium a volatilita 20%* nella sidebar, poi rilancia il backtest."
-        + (f" Alla volatilita mediana di questo sottostante ({sigma_med:.0%}) il VRP "
-           f"effettivamente applicato diventa {effettivo:.3f}, per effetto della pendenza."
-           if effettivo else "")
-        + " La calibrazione e' gia' inclusa nel JSON di export."
+        "**Calibrazione pronta.** Nella sidebar, sotto *Premio della call*, scegli "
+        "**Calibrato sui prezzi reali** e rilancia il backtest: i parametri vengono presi "
+        "da qui, non c'e' niente da ricopiare a mano. La calibrazione finisce anche nel JSON "
+        "di export."
+        + (f" Alla volatilita mediana di questo sottostante ({sigma_med:.0%}) il rapporto "
+           f"applicato e' {fit['modello'].vrp_effettivo(sigma_med):.3f}." if sigma_med else "")
     )
+    st.caption(_anteprima_premio(fit["modello"].vrp, fit["modello"].vrp_slope,
+                                 fit["modello"].target_delta))
 
 
 # ---------------------------------------------------------------------------
