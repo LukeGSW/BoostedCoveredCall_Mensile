@@ -1,7 +1,12 @@
-"""Boosted Covered Call — Studio Mensile.
+"""Boosted Covered Call — Studio Mensile e Settimanale.
 
-Dashboard Streamlit: capitale fisso annuo coperto da una call mensile venduta a
-delta 0.50, Buy-The-Dip potenziato sui mesi negativi, reset a fine anno.
+Dashboard Streamlit: capitale fisso annuo coperto da una call venduta a delta
+0.50, Buy-The-Dip potenziato dopo ogni periodo negativo, reset a fine anno.
+
+Uno switch in cima alla sidebar sceglie il passo: mensile (l'originale) oppure
+settimanale, dove tutto quello che si fa a fine mese si fa a fine settimana.
+Il ciclo annuale non cambia mai. I testi seguono la cadenza scelta: `A()` li
+riscrive al volo, cosi' il codice resta scritto una volta sola.
 
 Il premio non e' piu' un numero da indovinare: viene stimato dalla volatilita'
 realizzata del sottostante e puo' essere calibrato sui prezzi reali delle
@@ -18,20 +23,21 @@ import streamlit as st
 
 from kq_btd_cc import CSS, __version__ as VERSIONE
 from kq_btd_cc import calibration as calib
+from kq_btd_cc.cadenza import CADENZE, adatta, label as etichetta_cadenza, normalizza
 from kq_btd_cc import charts
 from kq_btd_cc.core import PREFERENZE_DEFAULT, costruisci_config, costruisci_figure
 from kq_btd_cc.data_api import ChiaveMancante, DatiNonDisponibili, carica_serie, ha_api_key
 from kq_btd_cc.engine import (VARIANTS, dettaglio_anno, piano_prossimo_mese,
                               run_backtest)
 from kq_btd_cc.export import build_export, export_json_bytes, nome_file_export
-from kq_btd_cc.metrics import ETICHETTE, format_value, metrics_table
+from kq_btd_cc.metrics import etichette as etichette_metriche, format_value, metrics_table
 from kq_btd_cc.pricing import PremiumModel
 from kq_btd_cc import riferimenti
 from kq_btd_cc.utils import fmt_currency_compact, fmt_num, fmt_pct
 from kq_btd_cc.vol import VOL_MODELS
 
 st.set_page_config(
-    page_title="Boosted Covered Call — Studio Mensile",
+    page_title="Boosted Covered Call",
     page_icon="📈", layout="wide", initial_sidebar_state="expanded",
 )
 st.markdown(CSS, unsafe_allow_html=True)
@@ -56,6 +62,24 @@ def _kwargs_larghezza() -> Dict[str, Any]:
 
 
 LARGO = _kwargs_larghezza()
+
+
+def cadenza_corrente() -> str:
+    """La cadenza da usare nei testi.
+
+    Sono i RISULTATI mostrati a comandare: se si cambia lo switch senza rilanciare
+    il backtest, le tabelle a schermo parlano ancora del passo con cui sono state
+    calcolate. Prima del primo backtest vale la scelta fatta nella sidebar.
+    """
+    r = st.session_state.get("risultato")
+    if isinstance(r, dict) and isinstance(r.get("config"), dict):
+        return normalizza(r["config"].get("cadenza"))
+    return normalizza(st.session_state.get("cadenza"))
+
+
+def A(testo: str) -> str:
+    """Il testo, scritto al mensile, riscritto per la cadenza in uso."""
+    return adatta(testo, cadenza_corrente())
 
 # Estremi del periodo selezionabile. 1970 copre tutto lo storico che EODHD puo'
 # restituire su indici e azioni, bolla dot-com e crisi del 2008 comprese.
@@ -151,6 +175,20 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
     with st.sidebar:
         st.markdown("### Parametri")
 
+        # Lo switch sta in cima perche' decide il significato di tutto quello che
+        # viene dopo: premio, segnale, acquisti sui cali e interessi cambiano passo.
+        cadenza = st.radio(
+            "Cadenza della strategia", options=list(CADENZE), key="cadenza",
+            format_func=lambda c: CADENZE[c]["label"], horizontal=True, index=0,
+            help="Il passo con cui si vende la call, si controlla il segnale e si "
+                 "comprano i cali. Il ciclo annuale — capitale deciso a gennaio, "
+                 "tutto liquidato a dicembre — resta identico in entrambe.")
+        st.caption(CADENZE[cadenza]["descrizione"])
+
+        def _a(testo: str) -> str:
+            """I testi della sidebar seguono lo switch, non i risultati a schermo."""
+            return adatta(testo, cadenza)
+
         with st.expander("Sottostante e periodo", expanded=True):
             ticker = st.text_input(
                 "Ticker EODHD", value="BTC-USD.CC",
@@ -158,7 +196,8 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
             # Niente st.date_input qui: il calendario di Streamlit elenca nel menu
             # degli anni una finestra fissa di vent'anni, e ignora min_value. Con
             # max_value a oggi si ferma al 2007, tagliando fuori la bolla dot-com.
-            # Il motore lavora su barre mensili, quindi anno e mese bastano.
+            # Il periodo si sceglie comunque per mese: il motore poi lo taglia
+            # sulle barre della cadenza scelta.
             c1, c2 = st.columns([1, 1.4])
             with c1:
                 anno_inizio = st.number_input(
@@ -247,10 +286,11 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                      "capitale addizionale annuale, che entra invece una volta sola.") / 100.0
             limite_dd = st.slider(
                 "Sospendi il BTD sotto questo drawdown settimanale", -95.0, -20.0, -90.0, 5.0,
-                help="Se il drawdown settimanale dell'asset e' piu' profondo di questa "
-                     "soglia, l'acquisto del mese viene saltato.") / 100.0
+                help=_a("Se il drawdown settimanale dell'asset e' piu' profondo di questa "
+                        "soglia, l'acquisto del mese viene saltato.")) / 100.0
             esecuzione = st.radio(
-                "Esecuzione dell'acquisto", ["Apertura del mese", "Chiusura del mese"],
+                _a("Esecuzione dell'acquisto"),
+                [_a("Apertura del mese"), _a("Chiusura del mese")],
                 index=0, horizontal=False,
                 help="Il segnale e' noto alla chiusura del mese precedente: comprare "
                      "all'apertura e' la scelta eseguibile. La chiusura riproduce il "
@@ -384,6 +424,7 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
         st.caption(f"kq_btd_cc {VERSIONE} · Streamlit {st.__version__}")
 
     params: Dict[str, Any] = {
+        "cadenza": cadenza,
         "ticker": ticker or "BTC-USD.CC",
         "start_date": data_inizio.strftime("%Y-%m-%d"),
         "end_date": data_fine.strftime("%Y-%m-%d") if fine_manuale else None,
@@ -461,11 +502,11 @@ def _avvisi_sottostante(risultato: Dict[str, Any], metriche: Dict[str, Any]) -> 
     prezzi = risultato.get("mercato", {}).get("prezzi")
     if isinstance(prezzi, pd.DataFrame) and not prezzi.empty:
         moltiplicatore = float(prezzi["Close"].iloc[-1] / prezzi["Open"].iloc[0])
-        anni = len(prezzi) / 12.0
+        anni = float(metriche.get("anni") or (len(prezzi) / 12.0))
         if moltiplicatore > 100 and anni > 3:
             st.warning(
                 f"**Il sottostante si e' moltiplicato per {moltiplicatore:,.0f} volte** in "
-                f"{anni:.0f} anni. Vendere ogni mese una call at-the-money su un rialzo di "
+                + A(f"{anni:.0f} anni. Vendere ogni mese una call at-the-money su un rialzo di ") +
                 f"questa portata significa cedere quasi tutto il guadagno: il costo del cap "
                 f"e' {fmt_currency_compact(metriche.get('intrinseco_totale'))} contro "
                 f"{fmt_currency_compact(metriche.get('premi_totali'))} di premi incassati. "
@@ -558,9 +599,9 @@ def scheda_sintesi(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
          f"{reinvest.get('anni_positivi', 0)}/{reinvest.get('anni_totali', 0)}",
          f"peggior anno {fmt_pct(reinvest.get('peggior_anno'), 1)}", None),
         ("Premio medio stimato", fmt_pct(cash.get("premio_pct_medio")),
-         "del prezzo del sottostante, al mese", None),
-        ("Call in-the-money", f"{cash.get('mesi_call_assegnata', 0)}/{cash.get('mesi', 0)}",
-         "mesi in cui il cap ha morso", None),
+         A("del prezzo del sottostante, al mese"), None),
+        (A("Call in-the-money"), f"{cash.get('mesi_call_assegnata', 0)}/{cash.get('mesi', 0)}",
+         A("mesi in cui il cap ha morso"), None),
     ])
 
     usa_ciclo = cash.get("ciclo_rendimento_medio") is not None
@@ -605,8 +646,9 @@ def scheda_opzione(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
         f"{pm.get('target_delta', 0.5):.2f}. La volatilita' implicita e' stimata come "
         f"volatilita' realizzata &times; VRP, con VRP {pm.get('vrp', 1.0):.2f} al 20% di "
         f"volatilita e pendenza {pm.get('vrp_slope', 0.0):+.3f}, su dati "
-        f"{html.escape(str(fonte))} e sempre noti <b>prima</b> dell'inizio del mese. "
-        f"L'incasso in valuta e' una percentuale del prezzo corrente, quindi cambia ogni mese."
+        + A(f"{html.escape(str(fonte))} e sempre noti <b>prima</b> dell'inizio del mese. "
+            f"L'incasso in valuta e' una percentuale del prezzo corrente, quindi cambia "
+            f"ogni mese.")
     )
     cash = risultato["varianti"].get("premi_cash", {}).get("metrics", {})
 
@@ -619,7 +661,8 @@ def scheda_opzione(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
     if finanziamento > 0.05 * float(cfg.get("capitale_iniziale", 1)):
         st.warning(
             f"Il riacquisto delle call in-the-money ha portato il conto a debito fino a "
-            f"{fmt_currency_compact(finanziamento)} per {cash.get('mesi_a_debito', 0)} mesi "
+            + A(f"{fmt_currency_compact(finanziamento)} per "
+                f"{cash.get('mesi_a_debito', 0)} mesi ") +
             f"({fmt_pct(finanziamento / float(cfg.get('capitale_iniziale', 1)), 0)} del capitale "
             f"fisso). Sul finanziamento e' applicato il "
             f"{cfg.get('debit_cash_rate', 0):.1%} annuo impostato nella sidebar. "
@@ -631,9 +674,10 @@ def scheda_opzione(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
         ("Movimento delle quote", fmt_currency_compact(cash.get("contributo_prezzo")),
          "il sottostante che sale o scende", segno_di(cash.get("contributo_prezzo"))),
         ("Premi incassati", fmt_currency_compact(cash.get("premi_totali")),
-         f"{fmt_pct(cash.get('premio_pct_medio'))} dello spot al mese", "pos"),
+         A(f"{fmt_pct(cash.get('premio_pct_medio'))} dello spot al mese"), "pos"),
         ("Intrinseco pagato", fmt_currency_compact(-(cash.get("intrinseco_totale") or 0)),
-         f"call ITM in {cash.get('mesi_call_assegnata', 0)} mesi su {cash.get('mesi', 0)}", "neg"),
+         A(f"call ITM in {cash.get('mesi_call_assegnata', 0)} mesi "
+           f"su {cash.get('mesi', 0)}"), "neg"),
         ("Netto delle opzioni", fmt_currency_compact(cash.get("netto_opzioni")),
          "premi meno intrinseco", segno_di(cash.get("netto_opzioni"))),
         ("Interessi", fmt_currency_compact(cash.get("interessi_netti")),
@@ -679,13 +723,15 @@ def scheda_btd(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
     cfg = risultato["config"]
     cap0 = float(cfg.get("capitale_iniziale", 0))
     nota(
-        f"Il segnale scatta quando il mese precedente chiude in negativo. Ogni acquisto vale "
+        A("Il segnale scatta quando il mese precedente chiude in negativo. ") +
+        f"Ogni acquisto vale "
         f"l'entita' del calo applicata al capitale iniziale <b>piu' il BTD Boost</b>, pari al "
         f"{cfg.get('boost_pct', 0):.1%} del capitale iniziale "
         f"({fmt_currency_compact(cap0 * float(cfg.get('boost_pct', 0)))} per ogni acquisto). "
         f"Nessun limite al cumulato dell'anno: ogni segnale viene eseguito per intero. "
         f"Esecuzione "
-        f"{'all&#39;apertura' if cfg.get('btd_execution') == 'open' else 'alla chiusura'} del mese."
+        + A(f"{'all&#39;apertura' if cfg.get('btd_execution') == 'open' else 'alla chiusura'}"
+            f" del mese.")
     )
     m = risultato["varianti"].get("premi_cash", {}).get("metrics", {})
     # Di default non c'e' nessun tetto; l'avviso serve solo a chi ne imposta uno
@@ -755,7 +801,7 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
         ("Premi incassati", fmt_currency_compact(r["premi_incassati"]),
          f"intrinseco pagato {fmt_currency_compact(r['intrinseco_pagato'])}", "pos"),
         ("Netto opzioni", fmt_currency_compact(r["netto_opzioni"]),
-         f"call ITM in {r['mesi_call_itm']} mesi su {r['mesi_trascorsi']}",
+         A(f"call ITM in {r['mesi_call_itm']} mesi su {r['mesi_trascorsi']}"),
          segno_di(r["netto_opzioni"])),
         ("BTD investito", fmt_currency_compact(r["btd_investito"]),
          f"{r['btd_numero']} acquisti nell'anno", None),
@@ -783,10 +829,10 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
         dettagli.append(f"{r['segnali_bloccati']} segnali bloccati dal filtro")
     nota(" · ".join(dettagli))
 
-    # ---------------- Piano del mese prossimo ----------------
+    # ---------------- Piano del periodo prossimo ----------------
     piano = piano_prossimo_mese(risultato, variante)
     if piano and int(scelto) == int(risultato["varianti"][variante]["monthly"]["anno"].iloc[-1]):
-        st.markdown("#### Cosa fare il mese prossimo")
+        st.markdown(A("#### Cosa fare il mese prossimo"))
         if piano["reset_annuale"]:
             st.warning(
                 f"**{piano['mese']} — reset annuale.** Liquidare tutta la posizione alla "
@@ -799,7 +845,8 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
             if piano["segnale_btd"] and piano["btd_importo"] > 0:
                 righe.append(
                     f"**Acquisto BTD di {fmt_currency_compact(piano['btd_importo'])}** "
-                    f"all'apertura del mese: {fmt_currency_compact(piano['btd_quota_calo'])} "
+                    + A("all'apertura del mese: ")
+                    + f"{fmt_currency_compact(piano['btd_quota_calo'])} "
                     f"per il calo del {fmt_pct(abs(piano['rendimento_ultimo_mese']), 1)} e "
                     f"{fmt_currency_compact(piano['btd_quota_boost'])} di boost."
                     + (f" Dopo l'acquisto resteranno "
@@ -815,8 +862,8 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
                 righe.append("Segnale BTD presente ma l'importo calcolato e' nullo.")
             else:
                 righe.append(
-                    f"**Nessun acquisto BTD**: l'ultimo mese ha chiuso a "
-                    f"{fmt_pct(piano['rendimento_ultimo_mese'], 1)}."
+                    A("**Nessun acquisto BTD**: l'ultimo mese ha chiuso a ")
+                    + f"{fmt_pct(piano['rendimento_ultimo_mese'], 1)}."
                 )
             if piano.get("premio_pct"):
                 righe.append(
@@ -830,20 +877,23 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
                     f"VRP {fmt_num(piano['vrp_applicato'])})."
                 )
             st.info(f"**{piano['mese']}** — " + "  \n".join(righe))
-            st.caption(
+            st.caption(A(
                 "Segnale e volatilita' sono gia' determinati dalla chiusura del mese scorso. "
                 "Lo strike e le quote si ricalcolano sul prezzo di apertura effettivo."
-            )
+            ))
 
-    # ---------------- Tabella mese per mese ----------------
-    st.markdown("#### Dettaglio mese per mese")
+    # ---------------- Tabella periodo per periodo ----------------
+    st.markdown(A("#### Dettaglio mese per mese"))
     g = dett["mesi"].copy()
-    g["mese"] = [MESI_IT[d.month - 1].capitalize() for d in g.index]
+    # Sul settimanale il nome del mese non identifica la riga: serve la data.
+    g["mese"] = ([d.strftime("%d/%m") for d in g.index]
+                 if cadenza_corrente() == "settimanale"
+                 else [MESI_IT[d.month - 1].capitalize() for d in g.index])
     g["stato_btd"] = [
         "bloccato" if (b and s) else ("acquisto" if i > 0 else ("segnale" if s else "—"))
         for s, b, i in zip(g["segnale_btd"], g["btd_bloccato"], g["btd_importo"])
     ]
-    vista = pd.DataFrame({etichetta: g[col] for col, etichetta in COLONNE_MONITOR
+    vista = pd.DataFrame({A(etichetta): g[col] for col, etichetta in COLONNE_MONITOR
                           if col in g.columns})
     valuta = ["Apertura", "Chiusura", "BTD dal calo", "BTD dal boost", "BTD totale",
               "Capitale impiegato", "Strike venduto", "Premio incassato",
@@ -852,13 +902,13 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
     for c in valuta:
         if c in vista.columns:
             vista[c] = vista[c].map(lambda v: "—" if pd.isna(v) else f"{v:,.2f}")
-    for c in ("Rend. mese", "Premio %"):
+    for c in (A("Rend. mese"), "Premio %"):
         if c in vista.columns:
             vista[c] = vista[c].map(lambda v: "—" if pd.isna(v) else f"{v * 100:,.2f}%")
     for c in ("Quote coperte", "Quote extra"):
         if c in vista.columns:
             vista[c] = vista[c].map(lambda v: f"{v:,.4f}")
-    st.dataframe(vista.set_index("Mese"), **LARGO)
+    st.dataframe(vista.set_index(A("Mese")), **LARGO)
 
     csv = dett["mesi"].to_csv().encode("utf-8")
     st.download_button(f"Scarica il {anno} in CSV", data=csv,
@@ -875,7 +925,7 @@ def scheda_dati(risultato: Dict[str, Any], calibrazione: Optional[Dict[str, Any]
     if not tb.empty:
         vista = pd.DataFrame(
             {col: [format_value(k, tb.loc[k, col]) for k in tb.index] for col in tb.columns},
-            index=[ETICHETTE.get(k, k) for k in tb.index],
+            index=[etichette_metriche(cadenza_corrente()).get(k, k) for k in tb.index],
         )
         st.dataframe(vista, **LARGO)
 
@@ -914,7 +964,7 @@ def scheda_dati(risultato: Dict[str, Any], calibrazione: Optional[Dict[str, Any]
                    "mercato. Le ultime colonne confrontano con il solo sottostante che segue "
                    "lo stesso ciclo annuale.")
 
-    st.markdown("#### Serie mensile")
+    st.markdown(A("#### Serie mensile"))
     mdf = risultato["varianti"][scelta]["monthly"]
     colonne = st.multiselect(
         "Colonne", options=list(mdf.columns), key="col_mensili",
@@ -926,7 +976,8 @@ def scheda_dati(risultato: Dict[str, Any], calibrazione: Optional[Dict[str, Any]
         st.dataframe(mdf[colonne], height=420, **LARGO)
 
     st.markdown("#### Scarica il backtest")
-    nota("Il file JSON contiene parametri, equity, serie mensile completa di ogni variante, "
+    nota(A("Il file JSON contiene parametri, equity, serie mensile completa di ogni "
+           "variante, ") +
          "tabelle annuali, flussi di cassa, metriche, volatilita' stimata, la calibrazione "
          "del premio e un dizionario che spiega ogni campo.")
     blob, schema = costruisci_export(risultato, calibrazione)
@@ -1098,11 +1149,16 @@ def scheda_calibrazione(risultato: Optional[Dict[str, Any]], params: Dict[str, A
 # ---------------------------------------------------------------------------
 # Corpo
 # ---------------------------------------------------------------------------
-st.title("Boosted Covered Call — Studio Mensile")
-st.caption("Capitale fisso annuo coperto da una call mensile a delta 0.50, Buy-The-Dip "
-           "potenziato sui mesi negativi, liquidazione e reset a fine anno.")
-
 params, prefs, esegui = sidebar()
+
+# Il titolo va scritto prima che il backtest giri, quindi non puo' leggere la
+# cadenza dai risultati: quando si sta per lanciare una nuova esecuzione vale
+# quella appena scelta nella sidebar, altrimenti quella dei risultati a schermo.
+_cad_titolo = normalizza(params.get("cadenza")) if esegui else cadenza_corrente()
+st.title(f"Boosted Covered Call — Studio {etichetta_cadenza(_cad_titolo)}")
+st.caption(adatta("Capitale fisso annuo coperto da una call mensile a delta 0.50, "
+                  "Buy-The-Dip potenziato sui mesi negativi, liquidazione e reset a "
+                  "fine anno.", _cad_titolo))
 
 if not ha_api_key():
     st.warning(
@@ -1131,7 +1187,7 @@ risultato = st.session_state.get("risultato")
 if risultato is None:
     st.info("Imposta i parametri nella sidebar e premi **Esegui il backtest**.")
     with st.expander("Cosa fa questa strategia", expanded=True):
-        st.markdown(
+        st.markdown(A(
             """
 Ogni anno si impiega lo **stesso capitale fisso**, deciso in partenza, comprando il
 sottostante all'apertura di gennaio. Su quelle quote si vende ogni mese una call a
@@ -1148,7 +1204,7 @@ resta come cassa; se manca capitale si versa la differenza — e quella e' un ve
 non un utile. Ogni euro entrato dall'esterno viene tracciato, cosi' l'utile mostrato e'
 al netto dei versamenti e i rendimenti sono time-weighted.
             """
-        )
+        ))
     st.stop()
 
 if not risultato.get("ok"):
@@ -1172,6 +1228,7 @@ periodo_a = risultato["varianti"]["premi_cash"]["metrics"].get("periodo_inizio",
 periodo_b = risultato["varianti"]["premi_cash"]["metrics"].get("periodo_fine", "—")
 st.caption(
     f"**{html.escape(str(cfg.get('ticker')))}** · dal {periodo_a} al {periodo_b} · "
+    f"cadenza {etichetta_cadenza(cadenza_corrente()).lower()} · "
     f"capitale fisso ${cfg.get('capitale_iniziale', 0):,.0f} · "
     f"boost {cfg.get('boost_pct', 0):.1%} · "
     f"volatilita da {risultato['mercato'].get('vol_source', 'n.d.')}"
