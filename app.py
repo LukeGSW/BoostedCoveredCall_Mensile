@@ -58,6 +58,11 @@ def _kwargs_larghezza() -> Dict[str, Any]:
 
 LARGO = _kwargs_larghezza()
 
+# Estremi del calendario nella sidebar. 1970 copre tutto lo storico che EODHD
+# puo' restituire su indici e azioni, bolla dot-com e 2008 comprese.
+DATA_MINIMA = dt.date(1970, 1, 1)
+OGGI = dt.date.today()
+
 
 # ---------------------------------------------------------------------------
 # Helper di rendering
@@ -100,14 +105,25 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
             ticker = st.text_input(
                 "Ticker EODHD", value="BTC-USD.CC",
                 help="Formato EODHD: BTC-USD.CC, ETH-USD.CC, SPY.US, AAPL.US...").strip()
+            # Senza min_value e max_value espliciti, Streamlit costruisce da solo
+            # una finestra di dieci anni attorno al valore di default: con default
+            # 2018 il calendario si fermerebbe al 2008, tagliando fuori la bolla
+            # dot-com e la crisi del 2008.
             c1, c2 = st.columns(2)
             with c1:
-                data_inizio = st.date_input("Inizio", value=dt.date(2018, 1, 1),
-                                            min_value=dt.date(1990, 1, 1))
+                data_inizio = st.date_input(
+                    "Inizio", value=dt.date(2018, 1, 1),
+                    min_value=DATA_MINIMA, max_value=OGGI,
+                    help="Il backtest parte da qui. Lo storico effettivo dipende dal "
+                         "ticker: EODHD restituisce i dati dalla prima data disponibile.")
             with c2:
                 fine_manuale = st.checkbox("Fine manuale", value=False)
-                data_fine = st.date_input("Fine", value=dt.date.today() - dt.timedelta(days=1),
-                                          disabled=not fine_manuale)
+                data_fine = st.date_input(
+                    "Fine", value=OGGI - dt.timedelta(days=1),
+                    min_value=DATA_MINIMA, max_value=OGGI,
+                    disabled=not fine_manuale)
+            if fine_manuale and data_fine <= data_inizio:
+                st.error("La data di fine deve essere successiva a quella di inizio.")
 
         with st.expander("Capitale", expanded=True):
             capitale = st.number_input(
