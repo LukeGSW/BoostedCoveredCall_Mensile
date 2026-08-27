@@ -46,8 +46,11 @@ DIZIONARIO_CAMPI: Dict[str, str] = {
     "reinvestito": "Importo reinvestito in quote (solo variante Reinvest)",
     "quote_coperte": "Quote coperte dalla covered call, costanti nell'anno",
     "quote_extra": "Quote non coperte (capitale addizionale, BTD, reinvestimenti)",
-    "cassa": "Liquidita' del conto; negativa quando il riacquisto della call e' "
-             "finanziato a debito contro le azioni in portafoglio",
+    "cassa": "Liquidita' totale del conto, operativa piu' quella dei premi; negativa "
+             "quando il riacquisto della call e' finanziato a debito contro le azioni",
+    "cassa_opzioni": "Parte della liquidita' che viene dai premi incassati meno "
+                     "l'intrinseco pagato. Nella variante Cash resta separata e non "
+                     "finanzia gli acquisti sui cali, che si pagano con capitale proprio",
     "interessi": "Interessi del mese: attivi sulla cassa positiva, passivi sul saldo a debito",
     "liquidazione": "Controvalore liquidato al reset di inizio anno",
     "valore_portafoglio": "Valore totale del conto: quote a mercato piu' cassa",
@@ -144,7 +147,13 @@ def build_export(
                     "versamenti_cum traccia il denaro entrato dall'esterno; "
                     "pnl_netto = valore_portafoglio - versamenti_cum."
                 ),
-                "rendimenti": "Time-weighted, con i flussi del mese trattati a inizio periodo.",
+                "rendimenti": (
+                    "Il rendimento di ogni anno e' semplice, non composto: risultato "
+                    "dell'anno diviso il capitale davvero investito in quel ciclo "
+                    "(capitale di gennaio piu' gli acquisti sui cali). I premi "
+                    "reinvestiti non entrano al denominatore perche' arrivano dal "
+                    "mercato. Il rischio resta misurato sul rendimento time-weighted "
+                    "mensile, che neutralizza i flussi di cassa."),
                 "benchmark": (
                     "Il confronto corretto e' 'solo sottostante, stesso ciclo annuale': "
                     "stesso capitale fisso impiegato a gennaio e liquidato a dicembre, "
