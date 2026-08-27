@@ -204,6 +204,23 @@ apertura, sottostante all'apertura e premio incassato, tiene solo le vendite di 
 ignora la serie di equity giornaliera affiancata ai trade. Un esempio in formato generico
 e' in [`esempio_calibrazione.csv`](esempio_calibrazione.csv).
 
+### Percentuale o valuta: come si leggono i drawdown
+
+I drawdown si confrontano **solo in percentuale**. Quello in valuta dipende da quanto
+capitale ciascuna curva sta facendo lavorare, e i Buy-The-Dip ne fanno impiegare alla
+strategia molto piu' che al benchmark. Su S&P 500 dal 2000:
+
+| | Drawdown in valuta | Drawdown in percentuale | Capitale medio impiegato |
+|---|---|---|---|
+| Buy & Hold (ciclo annuale) | −48.338 | −46,3% | 79.440 |
+| BTD + Premi (Cash) | −53.272 | **−33,8%** | 96.440 (+21%) |
+| BTD + Premi (Reinvest) | −55.790 | **−32,8%** | 100.338 (+26%) |
+
+In dollari la strategia sembra perdere di piu'; in percentuale perde un terzo in meno.
+La seconda e' la lettura giusta, ed e' quella che la dashboard usa in tutti i grafici di
+drawdown e nella riga *Riduzione del drawdown*. L'importo in valuta resta nell'annotazione
+del grafico e in una riga a parte della tabella metriche, etichettata per quello che e'.
+
 ---
 
 ## Seguire la strategia a mercato
