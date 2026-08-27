@@ -314,33 +314,49 @@ def fig_equity_drawdown(risultato: Dict[str, Any], chiave: str) -> go.Figure:
         x=df.index, y=df["valore_portafoglio"], name=res["label"],
         line=dict(color=colore, width=2.6), hovertemplate=HT_VAL), row=1, col=1)
 
-    dd = df["dd_valore"]
+    # Il drawdown del pannello basso e' in PERCENTUALE, non in valuta.
+    # Confrontare due portafogli in dollari assoluti inganna: i Buy-The-Dip fanno
+    # lavorare piu' capitale, quindi la strategia puo' perdere piu' dollari pur
+    # perdendo una percentuale molto minore. La percentuale e' l'unica misura
+    # confrontabile, ed e' la stessa che finisce nella tabella delle metriche.
+    dd = df["dd_twr_pct"]
     if bm is not None:
-        sb = bm["monthly"]["dd_valore"]
+        sb = bm["monthly"]["dd_twr_pct"]
         _traccia_benchmark(fig, sb.index, sb.values,
-                           f"Drawdown del {bm['label']}", riga=2)
-        fig.data[-1].update(hovertemplate=HT_VAL)
+                           f"Drawdown del {bm['label']}", riempi=True, riga=2)
+        fig.data[-1].update(hovertemplate=HT_PCT)
     fig.add_trace(go.Scatter(
         x=dd.index, y=dd.values, name="Drawdown del conto",
-        line=dict(color=PALETTE["drawdown"], width=1.4),
+        line=dict(color=PALETTE["drawdown"], width=1.6),
         fill="tozeroy", fillcolor="rgba(244,63,94,0.22)",
-        hovertemplate=HT_VAL), row=2, col=1)
+        hovertemplate=HT_PCT), row=2, col=1)
 
     peggiore = dd.idxmin() if dd.notna().any() else None
     if peggiore is not None and dd.min() < 0:
+        in_valuta = float(df["dd_valore"].min())
         fig.add_annotation(
-            x=peggiore, y=dd.min(), row=2, col=1, text=f"${dd.min():,.0f}",
-            showarrow=True, arrowhead=0, arrowcolor=PALETTE["drawdown"], ax=0, ay=22,
+            x=peggiore, y=dd.min(), row=2, col=1,
+            text=f"{dd.min():.1%} (${in_valuta:,.0f})",
+            showarrow=True, arrowhead=0, arrowcolor=PALETTE["drawdown"], ax=0, ay=24,
             font=dict(color=PALETTE["drawdown"], size=11, family=FONT_MONO))
 
     _bande_anni(fig, df.index, riga=1)
     fig.update_yaxes(tickprefix="$", title_text="Valore", row=1, col=1)
-    fig.update_yaxes(tickprefix="$", title_text="Drawdown", row=2, col=1)
+    fig.update_yaxes(tickformat=".0%", title_text="Drawdown", row=2, col=1)
     _asse_tempo(fig, selettore=False, riga=1)
     _asse_tempo(fig, selettore=False, riga=2)
-    return _layout(fig, f"{res['label']} — valore e drawdown",
-                   "In alto il conto contro il capitale versato, in basso la discesa dal massimo.",
-                   altezza=560)
+
+    capitale = float(((df["quote_coperte"] + df["quote_extra"]) * df["close"]).mean())
+    sotto = ("In alto il conto contro il capitale versato, in basso la discesa dal massimo, "
+             "in percentuale.")
+    if bm is not None:
+        cap_bm = float(((bm["monthly"]["quote_coperte"] + bm["monthly"]["quote_extra"])
+                        * bm["monthly"]["close"]).mean())
+        if cap_bm > 0 and abs(capitale / cap_bm - 1) > 0.05:
+            sotto += (f" La strategia impiega in media {capitale / cap_bm - 1:+.0%} di "
+                      f"capitale rispetto al benchmark, per via dei Buy-The-Dip: per questo "
+                      f"il confronto va fatto in percentuale e non in dollari.")
+    return _layout(fig, f"{res['label']} — valore e drawdown", sotto, altezza=560)
 
 
 # ============================================================================
