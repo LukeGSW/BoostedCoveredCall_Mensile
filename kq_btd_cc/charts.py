@@ -13,11 +13,14 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from .cadenza import adatta, normalizza, periodi_anno
 from .style import (PALETTE, COLORE_BENCHMARK, COLORE_VARIANTE, SCALA_DIVERGENTE,
                     TEMPLATE_NAME, FONT_MONO)
 from .metrics import drawdown_durations
 
 MESI_IT = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+
+SETTIMANE_IT = [f"S{i}" for i in range(1, 54)]
 
 # hovertemplate riusabili
 HT_VAL = "%{fullData.name}: <b>$%{y:,.0f}</b><extra></extra>"
@@ -27,8 +30,19 @@ HT_PCT = "%{fullData.name}: <b>%{y:.2%}</b><extra></extra>"
 # ----------------------------------------------------------------------------
 # Impaginazione comune
 # ----------------------------------------------------------------------------
+def _cadenza(risultato: Dict[str, Any]) -> str:
+    """La cadenza del backtest, per scrivere "settimana" dove il codice dice "mese"."""
+    return normalizza((risultato.get("config") or {}).get("cadenza"))
+
+
+def _periodi_anno(risultato: Dict[str, Any]) -> int:
+    return periodi_anno((risultato.get("config") or {}).get("cadenza"))
+
+
 def _layout(fig: go.Figure, titolo: str, sottotitolo: str = "", altezza: int = 460,
-            legenda: bool = True) -> go.Figure:
+            legenda: bool = True, cad: Optional[str] = None) -> go.Figure:
+    if cad:
+        titolo, sottotitolo = adatta(titolo, cad), adatta(sottotitolo, cad)
     testo = titolo
     if sottotitolo:
         testo += (f"<br><span style='font-size:12px;color:{PALETTE['text_muted']};"
@@ -260,7 +274,7 @@ def fig_confronto_equity(risultato: Dict[str, Any], log: bool = False,
     if fuori:
         _nota_fuori_scala(
             fig, "Fuori scala, non disegnati: " + " · ".join(fuori)
-                 + ".<br>Non liquidano mai, mentre la strategia chiude ogni dodici mesi. "
+                 + ".<br>Non liquidano mai, mentre la strategia chiude ogni anno. "
                    "Attiva la scala logaritmica nella sidebar per vederli.")
     return fig
 
@@ -292,7 +306,7 @@ def fig_pnl_netto(risultato: Dict[str, Any]) -> go.Figure:
             nota_extra = (f"Buy &amp; Hold che non liquida mai: {s.iloc[-1]:,.0f} $, "
                           f"fuori scala di {abs(s.iloc[-1]) / max(scala, 1):,.0f} volte. "
                           f"Tiene per sempre le quote comprate all'inizio, mentre la "
-                          f"strategia liquida ogni dodici mesi: non e' un confronto "
+                          f"strategia liquida ogni anno: non e' un confronto "
                           f"a parita di mandato.")
         else:
             fig.add_trace(go.Scatter(
@@ -550,9 +564,9 @@ def fig_btd(risultato: Dict[str, Any], chiave: str = "premi_cash") -> go.Figure:
                 marker=dict(color=PALETTE["strike"], size=11, symbol="triangle-up",
                             line=dict(color=PALETTE["bg"], width=1)),
                 customdata=np.c_[cali.values],
-                hovertemplate=("Tetto annuo gia' esaurito<br>"
-                               "il mese prima aveva fatto %{customdata[0]:.1%}"
-                               "<extra></extra>"),
+                hovertemplate=(adatta("Tetto annuo gia' esaurito<br>"
+                                      "il mese prima aveva fatto ", _cadenza(risultato))
+                               + "%{customdata[0]:.1%}<extra></extra>"),
             ), secondary_y=False)
 
         tagliati = df[df["btd_tagliato_dal_tetto"] > 1e-9]
@@ -618,7 +632,7 @@ def fig_dd_settimanale(risultato: Dict[str, Any]) -> go.Figure:
     return _layout(fig, "Drawdown settimanale dell'asset e filtro sul BTD",
                    "Sotto la soglia il Buy-The-Dip viene sospeso. La decisione usa il dato "
                    "disponibile a fine mese precedente, mai quello del mese in corso.",
-                   altezza=400)
+                   altezza=400, cad=_cadenza(risultato))
 
 
 # ============================================================================
@@ -674,9 +688,17 @@ def fig_heatmap_mensile(risultato: Dict[str, Any], chiave: str = "premi_reinvest
     if not res or res["monthly"].empty:
         return _vuoto("Nessun dato disponibile")
     df = res["monthly"]
-    piv = (df.assign(m=df.index.month, a=df.index.year)
+    cad = _cadenza(risultato)
+    # Sul settimanale le colonne sono le 53 settimane ISO invece dei 12 mesi.
+    if cad == "settimanale":
+        colonne, etichette_x = range(1, 54), SETTIMANE_IT
+        periodo = df.index.isocalendar().week.astype(int).values
+    else:
+        colonne, etichette_x = range(1, 13), MESI_IT
+        periodo = df.index.month
+    piv = (df.assign(m=periodo, a=df.index.year)
              .pivot_table(index="a", columns="m", values="twr_mese", aggfunc="last")
-             .reindex(columns=range(1, 13)))
+             .reindex(columns=colonne))
     if piv.empty:
         return _vuoto("Nessun dato disponibile")
 
@@ -685,9 +707,10 @@ def fig_heatmap_mensile(risultato: Dict[str, Any], chiave: str = "premi_reinvest
                      np.vectorize(lambda v: f"{v:.1%}" if np.isfinite(v) else "")(piv.values), "")
 
     fig = go.Figure(go.Heatmap(
-        z=piv.values, x=MESI_IT, y=piv.index.astype(str),
+        z=piv.values, x=list(etichette_x), y=piv.index.astype(str),
         colorscale=SCALA_DIVERGENTE, zmid=0.0, zmin=-limite, zmax=limite,
-        text=testo, texttemplate="%{text}",
+        # con 53 colonne il valore scritto dentro la cella non ci starebbe piu'
+        text=testo, texttemplate="" if cad == "settimanale" else "%{text}",
         textfont=dict(size=10, family=FONT_MONO),
         xgap=3, ygap=3,
         colorbar=dict(tickformat=".0%", outlinewidth=0, thickness=12,
@@ -697,7 +720,7 @@ def fig_heatmap_mensile(risultato: Dict[str, Any], chiave: str = "premi_reinvest
     fig.update_xaxes(side="top", showgrid=False, title_text="")
     return _layout(fig, f"Rendimenti mensili — {res['label']}",
                    "Rendimento time-weighted mese per mese.",
-                   altezza=max(300, 60 + 34 * len(piv)), legenda=False)
+                   altezza=max(300, 60 + 34 * len(piv)), legenda=False, cad=cad)
 
 
 # ============================================================================
@@ -741,20 +764,24 @@ def fig_distribuzione(risultato: Dict[str, Any]) -> go.Figure:
 
     fig.add_hline(y=0, line=dict(color=PALETTE["axis"], width=1.1))
     fig.update_layout(hovermode="closest", violingap=0.3)
-    fig.update_yaxes(tickformat=".0%", title_text="Rendimento mensile")
+    cad = _cadenza(risultato)
+    fig.update_yaxes(tickformat=".0%", title_text=adatta("Rendimento mensile", cad))
     fig.update_xaxes(showgrid=False)
     return _layout(fig, "Distribuzione dei rendimenti mensili",
                    "La covered call taglia la coda destra e lascia quasi intatta la sinistra: "
-                   "e' il costo del cap.", altezza=440)
+                   "e' il costo del cap.", altezza=440, cad=cad)
 
 
 # ============================================================================
 # 10. Rolling return
 # ============================================================================
-def fig_rolling(risultato: Dict[str, Any], finestra: int = 12) -> go.Figure:
+def fig_rolling(risultato: Dict[str, Any], finestra: Optional[int] = None) -> go.Figure:
+    """Rendimento su finestra mobile lunga un anno: 12 barre o 52, secondo la cadenza."""
     serie = _serie_varianti(risultato, "twr_mese")
     if not serie:
         return _vuoto("Nessun dato disponibile")
+    cad = _cadenza(risultato)
+    finestra = int(finestra or _periodi_anno(risultato))
     fig = go.Figure()
     for chiave, s in serie.items():
         rr = (1.0 + s).rolling(finestra).apply(np.prod, raw=True) - 1.0
@@ -766,10 +793,11 @@ def fig_rolling(risultato: Dict[str, Any], finestra: int = 12) -> go.Figure:
             line=dict(color=COLORE_VARIANTE.get(chiave, PALETTE["text"]), width=2.0),
             hovertemplate=HT_PCT))
     fig.add_hline(y=0, line=dict(color=PALETTE["axis"], width=1.1))
-    fig.update_yaxes(tickformat=".0%", title_text=f"Rendimento a {finestra} mesi")
+    fig.update_yaxes(tickformat=".0%", title_text=adatta(f"Rendimento a {finestra} mesi", cad))
     _asse_tempo(fig)
     return _layout(fig, f"Rendimento rolling a {finestra} mesi",
-                   "Rendimento composto della finestra mobile, time-weighted.", altezza=400)
+                   "Rendimento composto della finestra mobile, time-weighted.",
+                   altezza=400, cad=cad)
 
 
 # ============================================================================
@@ -851,15 +879,19 @@ def fig_durata_drawdown(risultato: Dict[str, Any]) -> go.Figure:
             marker=dict(color=COLORE_VARIANTE.get(chiave, PALETTE["text"]),
                         line=dict(width=2 if e_bench else 0, color=COLORE_BENCHMARK)),
             opacity=0.45 if e_bench else 0.72,
-            hovertemplate="%{fullData.name}<br>%{x} mesi: %{y} episodi<extra></extra>"))
+            hovertemplate=("%{fullData.name}<br>%{x} "
+                           + adatta("mesi", _cadenza(risultato))
+                           + ": %{y} episodi<extra></extra>")))
     if not trovato:
         return _vuoto("Nessun episodio di drawdown registrato")
     fig.update_layout(barmode="overlay", bargap=0.12)
-    fig.update_xaxes(title_text="Durata dell'episodio (mesi)", dtick=1, showgrid=False)
+    fig.update_xaxes(title_text=adatta("Durata dell'episodio (mesi)", _cadenza(risultato)),
+                     dtick=1, showgrid=False)
     fig.update_yaxes(title_text="Numero di episodi")
     return _layout(fig, "Durata degli episodi di drawdown",
                    "Quanto tempo passa sotto il massimo precedente, confrontato con il solo "
-                   "sottostante che segue lo stesso ciclo annuale.", altezza=400)
+                   "sottostante che segue lo stesso ciclo annuale.", altezza=400,
+                   cad=_cadenza(risultato))
 
 
 # ============================================================================
@@ -914,7 +946,7 @@ def fig_premio_stimato(risultato: Dict[str, Any], chiave: str = "premi_cash") ->
     return _layout(fig, "Premio stimato e volatilita",
                    f"Premio medio {medio:.2%} dello spot al mese. In basso l'incasso reale contro "
                    f"il costo del cap: la linea chiara e' il risultato netto cumulato.",
-                   altezza=580)
+                   altezza=580, cad=_cadenza(risultato))
 
 
 # ============================================================================
@@ -963,7 +995,8 @@ def fig_prezzo_strike(risultato: Dict[str, Any], chiave: str = "premi_cash") -> 
         return _vuoto("Questa variante non vende opzioni")
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df["close"], name="Chiusura del mese",
+    fig.add_trace(go.Scatter(x=df.index, y=df["close"],
+                             name=adatta("Chiusura del mese", _cadenza(risultato)),
                              line=dict(color=PALETTE["prezzo"], width=1.9),
                              hovertemplate="Close: <b>%{y:,.2f}</b><extra></extra>"))
     fig.add_trace(go.Scatter(x=df.index, y=df["strike"], name="Strike della call venduta",
@@ -984,7 +1017,7 @@ def fig_prezzo_strike(risultato: Dict[str, Any], chiave: str = "premi_cash") -> 
     return _layout(fig, "Prezzo del sottostante e strike venduto",
                    f"Call finita in-the-money in {n_itm} mesi su {n} ({n_itm / n:.0%}). "
                    f"A delta 0.50 lo strike sta appena sopra il prezzo di apertura.",
-                   altezza=440)
+                   altezza=440, cad=_cadenza(risultato))
 
 
 # ============================================================================
