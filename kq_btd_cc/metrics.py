@@ -17,6 +17,15 @@ neutralizza i flussi di cassa:
 
     r_t = valore_t / (valore_{t-1} + versamenti_t) - 1
 
+ATTENZIONE ALLA FREQUENZA DI VALORIZZAZIONE. Le metriche di questo modulo si
+calcolano sulla serie di PERIODO, cioe' su un valore per barra. Un crollo
+rientrato prima della chiusura della barra non compare: il drawdown misurato
+cosi' e' sistematicamente piu' tenero di quello vero. Il drawdown misurato sui
+prezzi di ogni giorno sta in `giornaliero.py` e arriva nelle stesse metriche con
+le chiavi `max_dd_giornaliero_pct` e `max_dd_intraday_pct`; `dd_nascosto_dal_periodo`
+dice quanti punti si perdevano guardando solo le chiusure di periodo. Per
+giudicare il rischio si guarda quello giornaliero.
+
 I drawdown sono riportati in tre versioni, perche' misurano cose diverse:
   * `dd_twr_pct`   -> quanto ha perso la strategia in percentuale (pulito dai flussi)
   * `dd_valore`    -> quanto e' sceso il valore del conto in valuta
@@ -336,7 +345,11 @@ def metrics_table(risultati: Dict[str, Any]) -> pd.DataFrame:
         "rendimento_su_rischio", "rendimento_su_drawdown",
         "anni_positivi", "anni_totali", "miglior_anno", "peggior_anno",
         "capitale_investito_medio",
+        "max_dd_giornaliero_pct", "max_dd_intraday_pct", "dd_nascosto_dal_periodo",
+        "ciclo_max_dd_giornaliero_pct", "riduzione_dd_giornaliera_vs_ciclo",
+        "dd_giornaliero_durata_max",
         "max_dd_pct", "max_dd_valore", "dd_durata_max_mesi",
+        "var_giornaliero", "peggior_giorno",
         "var_mensile", "cvar_mensile", "hit_rate", "miglior_mese", "peggior_mese",
         "contributo_prezzo", "premi_totali", "intrinseco_totale", "netto_opzioni",
         "interessi_netti", "premio_pct_medio",
@@ -360,7 +373,20 @@ ETICHETTE = {
     "versamenti_totali": "Capitale versato (totale)",
     "pnl_netto": "Utile netto dei versamenti",
     "roi_su_versamenti": "ROI sul capitale versato",
-    "max_dd_pct": "Max drawdown (%) — confrontabile",
+    "max_dd_giornaliero_pct": "Max drawdown VERO (%) — valorizzato ogni giorno",
+    "max_dd_intraday_pct": "Peggio visto in giornata (%) — sui minimi",
+    "dd_nascosto_dal_periodo": "Drawdown che la chiusura di periodo nascondeva",
+    "ciclo_max_dd_giornaliero_pct": "Max drawdown vero del solo sottostante (%)",
+    "riduzione_dd_giornaliera_vs_ciclo": "Riduzione del drawdown VERO vs solo sottostante",
+    "dd_giornaliero_durata_max": "Drawdown piu lungo (giorni di borsa)",
+    "dd_giornaliero_durata_media": "Durata media dei drawdown (giorni di borsa)",
+    "max_dd_giornaliero_valore": "Max drawdown giornaliero in valuta",
+    "var_giornaliero": "VaR giornaliero",
+    "peggior_giorno": "Peggior giorno",
+    "miglior_giorno": "Miglior giorno",
+    "giorni": "Giorni di borsa valorizzati",
+    "riconciliazione_scarto": "Scarto fra serie giornaliera e serie di periodo",
+    "max_dd_pct": "Max drawdown alla chiusura di periodo (%)",
     "max_dd_valore": "Max drawdown in valuta — dipende dal capitale impiegato",
     "dd_durata_max_mesi": "Drawdown piu lungo (mesi)",
     "var_mensile": "VaR mensile",
@@ -415,6 +441,12 @@ def etichette(cadenza: str = "mensile") -> Dict[str, str]:
 
 FORMATI = {
     "roi_su_versamenti": "pct", "max_dd_pct": "pct", "var_mensile": "pct",
+    "max_dd_giornaliero_pct": "pct", "max_dd_intraday_pct": "pct",
+    "dd_nascosto_dal_periodo": "pct", "ciclo_max_dd_giornaliero_pct": "pct",
+    "riduzione_dd_giornaliera_vs_ciclo": "pct",
+    "var_giornaliero": "pct", "peggior_giorno": "pct", "miglior_giorno": "pct",
+    "riconciliazione_scarto": "pct",
+    "dd_giornaliero_durata_max": "int", "giorni": "int",
     "rendimento_medio": "pct", "rendimento_mediano": "pct",
     "rendimento_volatilita": "pct", "miglior_anno": "pct", "peggior_anno": "pct",
     "rendimento_su_rischio": "num", "rendimento_su_drawdown": "num",
