@@ -4,15 +4,29 @@ Dashboard Streamlit per il backtest della strategia **Boosted Covered Call**: un
 fisso deciso a inizio anno, coperto da una call mensile venduta a delta 0.50, con acquisti
 Buy-The-Dip potenziati sui mesi negativi e liquidazione totale a fine anno.
 
-Le equity messe a confronto sono cinque:
+Le curve messe a confronto:
 
 | Curva | Cosa rappresenta |
 |---|---|
-| **Buy & Hold (capitale iniziale)** | il sottostante comprato una volta e mai piu' toccato |
-| **Buy & Hold (stessi versamenti)** | il sottostante che riceve gli stessi soldi negli stessi mesi della strategia — il confronto corretto |
+| **Buy & Hold (stesso ciclo annuale)** | il sottostante comprato a gennaio e liquidato a dicembre, come la strategia, ma senza opzioni e senza Buy-The-Dip — **e' il metro di paragone** |
 | **BTD No Premi** | solo Buy-The-Dip sul sottostante, nessuna opzione |
 | **BTD + Premi (Cash)** | covered call con i premi tenuti in liquidita' |
 | **BTD + Premi (Reinvest)** | covered call con il risultato netto delle opzioni reinvestito in quote |
+| Buy & Hold (capitale iniziale) | il sottostante comprato una volta e mai piu' toccato |
+| Buy & Hold (stessi versamenti) | riceve gli stessi soldi negli stessi mesi ma non liquida mai |
+
+Il benchmark che conta e' il primo. Gli ultimi due non liquidano mai: su un sottostante
+molto direzionale accumulano quote comprate anni prima a una frazione del prezzo e
+arrivano a valori che non sono confrontabili con una strategia che chiude ogni dodici mesi.
+Su BTC dal 2010 il buy and hold che non liquida arriva a **108 miliardi** contro i 7,3
+milioni del ciclo annuale: quando succede viene escluso dai grafici a scala lineare, con
+una nota che ne riporta il valore, e resta visibile in scala logaritmica.
+
+Il benchmark a parita' di mandato gira **dentro lo stesso motore** delle varianti, quindi
+ha le stesse colonne, le stesse metriche e la stessa tabella annuale, e compare accanto
+alle altre curve in ogni grafico: equity, utile netto, drawdown, equity e drawdown della
+singola variante, rischio e rendimento, durata degli episodi di drawdown, rendimenti
+annuali, distribuzione dei rendimenti, tabella delle metriche e dettaglio anno per anno.
 
 ---
 
