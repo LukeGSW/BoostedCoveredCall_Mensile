@@ -1,8 +1,13 @@
 """Costruzione del pacchetto JSON scaricabile con l'intero backtest.
 
 Contiene tutto quello che serve a rifare i conti fuori dalla dashboard:
-parametri, serie mensile completa di ogni variante, tabelle annuali,
-metriche, flussi di cassa, benchmark, volatilita' stimata e calibrazione.
+parametri, serie completa di ogni variante, tabelle annuali, metriche, flussi
+di cassa, benchmark, volatilita' stimata e calibrazione.
+
+I nomi dei campi restano quelli mensili (`serie_mensile`, `rendimento_mese`)
+anche quando il backtest gira a cadenza settimanale: cambiarli avrebbe reso
+illeggibili i file salvati in passato. Il campo `parametri.cadenza` dice sempre
+di che passo si tratta, e `strategia.cadenza` lo ripete in chiaro.
 """
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
+from .cadenza import adatta, label as etichetta_cadenza, normalizza, periodi_anno
 from .utils import dataframe_to_records, json_safe
 
 SCHEMA_VERSION = "2.0"
@@ -122,17 +128,20 @@ def build_export(
         }
 
     prezzi = mercato.get("prezzi")
+    cadenza = normalizza(cfg.get("cadenza"))
     export: Dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "generato_il": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "ok": True,
         "note": note,
         "strategia": {
-            "nome": "Boosted Covered Call mensile con Buy-The-Dip",
-            "descrizione": (
+            "nome": f"Boosted Covered Call {cadenza} con Buy-The-Dip",
+            "cadenza": cadenza,
+            "periodi_per_anno": periodi_anno(cadenza),
+            "descrizione": adatta(
                 "Capitale fisso impiegato a inizio anno e coperto da una call mensile "
                 "venduta a delta 0.50; acquisti Buy-The-Dip dopo ogni mese negativo, "
-                "maggiorati di un boost; liquidazione e reset a fine anno."
+                "maggiorati di un boost; liquidazione e reset a fine anno.", cadenza
             ),
             "convenzioni": {
                 "cap_covered_call": (
@@ -174,8 +183,13 @@ def build_export(
         "varianti": varianti,
         "calibrazione_premio": json_safe(calibrazione) if calibrazione else None,
         "avvisi": list(risultato.get("warnings", [])),
-        "dizionario_campi": DIZIONARIO_CAMPI,
+        "dizionario_campi": {k: adatta(v, cadenza) for k, v in DIZIONARIO_CAMPI.items()},
     }
+    # Le convenzioni sono scritte al mensile: sul settimanale vanno tradotte,
+    # altrimenti il file spiega una strategia diversa da quella che ha girato.
+    conv = export["strategia"]["convenzioni"]
+    export["strategia"]["convenzioni"] = {k: adatta(v, cadenza) for k, v in conv.items()}
+    export["strategia"]["cadenza_label"] = etichetta_cadenza(cadenza)
     return export
 
 
