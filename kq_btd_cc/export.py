@@ -50,7 +50,14 @@ DIZIONARIO_CAMPI: Dict[str, str] = {
     "versamento_mese": "Denaro entrato dall'esterno in questo mese",
     "versamenti_cum": "Denaro entrato dall'esterno dall'inizio del backtest",
     "pnl_netto": "Utile vero: valore_portafoglio meno versamenti_cum",
-    "bh_stessi_flussi": "Valore di un buy and hold che riceve gli stessi versamenti",
+    "bh_stessi_flussi": "Valore di un buy and hold che riceve gli stessi versamenti e non "
+                        "liquida mai; su un sottostante che si moltiplica per ordini di "
+                        "grandezza esce dalla scala di tutto il resto",
+    "ciclo_annuale": "Valore del solo sottostante comprato e liquidato con lo stesso ciclo "
+                     "annuale della strategia: il confronto a parita' di mandato",
+    "ciclo_annuale_pnl": "Utile netto del solo sottostante con lo stesso ciclo annuale",
+    "ciclo_annuale_twr": "Rendimento mensile time-weighted del solo sottostante",
+    "ciclo_annuale_dd": "Drawdown percentuale del solo sottostante",
     "twr_mese": "Rendimento time-weighted del mese, ripulito dai flussi",
     "indice_twr": "Indice dei rendimenti time-weighted (base 1)",
     "dd_valore": "Drawdown del valore del conto, in valuta",
@@ -83,8 +90,14 @@ def build_export(
     cfg = risultato["config"]
     mercato = risultato.get("mercato", {})
 
+    # Il benchmark viene esportato insieme alle varianti: ha la stessa struttura
+    # e serve a rifare qualunque confronto fuori dalla dashboard.
+    tutte = dict(risultato.get("varianti", {}))
+    if risultato.get("benchmark"):
+        tutte["benchmark"] = risultato["benchmark"]
+
     varianti: Dict[str, Any] = {}
-    for chiave, res in risultato.get("varianti", {}).items():
+    for chiave, res in tutte.items():
         mdf: pd.DataFrame = res.get("monthly", pd.DataFrame())
         ydf: pd.DataFrame = res.get("yearly", pd.DataFrame())
         if mdf.empty:
@@ -127,6 +140,12 @@ def build_export(
                     "pnl_netto = valore_portafoglio - versamenti_cum."
                 ),
                 "rendimenti": "Time-weighted, con i flussi del mese trattati a inizio periodo.",
+                "benchmark": (
+                    "Il confronto corretto e' 'solo sottostante, stesso ciclo annuale': "
+                    "stesso capitale fisso impiegato a gennaio e liquidato a dicembre, "
+                    "senza opzioni e senza Buy-The-Dip. Il buy and hold classico non "
+                    "liquida mai, quindi su un sottostante molto direzionale produce "
+                    "valori che non sono confrontabili."),
             },
         },
         "parametri": json_safe(cfg),
