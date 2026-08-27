@@ -173,6 +173,7 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99) -> Dict[str, Any
         "btd_numero": int((df["btd_importo"] > 0).sum()),
         "btd_totale": _f(df["btd_importo"].sum()),
         "btd_medio": _f(df.loc[df["btd_importo"] > 0, "btd_importo"].mean()),
+        **_btd_tetto(df),
 
         # Benchmark a parita' di flussi
         "bh_stessi_flussi_finale": _f(df["bh_stessi_flussi"].iloc[-1]),
@@ -212,6 +213,34 @@ def _ciclo_block(df: pd.DataFrame) -> Dict[str, Any]:
         "ciclo_sharpe": a["sharpe"],
         "ciclo_max_dd_pct": _f(df["ciclo_annuale_dd"].min()),
         "ciclo_twr_totale": _f(tot),
+    }
+
+
+def _btd_tetto(df: pd.DataFrame) -> Dict[str, Any]:
+    """Quanto il tetto annuo ha vincolato gli acquisti sui cali.
+
+    Quando il tetto e' il vincolo che decide, alzare il boost non fa comprare di
+    piu': fa solo esaurire il budget prima, su cali piu' superficiali, e lascia
+    scoperti quelli profondi che arrivano dopo. E' un effetto controintuitivo che
+    resta invisibile se non lo si misura.
+    """
+    if "btd_tagliato_dal_tetto" not in df.columns:
+        return {}
+    acquisti = df[df["btd_importo"] > 0]
+    quote = ((acquisti["btd_importo"] / acquisti["btd_prezzo"]).sum()
+             if not acquisti.empty else 0.0)
+    residui = df.groupby("anno")["btd_residuo_anno"].last()
+    anni_pieni = int((residui.fillna(np.inf) < 1.0).sum())
+    saltati = df[df["btd_saltato_dal_tetto"].astype(bool)]
+    cali_persi = df["rendimento_mese"].shift(1).reindex(saltati.index)
+    return {
+        "btd_prezzo_medio": _f(acquisti["btd_importo"].sum() / quote) if quote else None,
+        "btd_quote_comprate": _f(quote),
+        "btd_tagliato_dal_tetto": _f(df["btd_tagliato_dal_tetto"].sum()),
+        "btd_segnali_saltati": int(df["btd_saltato_dal_tetto"].astype(bool).sum()),
+        "btd_calo_peggiore_saltato": _f(cali_persi.min()) if len(cali_persi) else None,
+        "anni_con_tetto_esaurito": anni_pieni,
+        "anni_totali": int(df["anno"].nunique()),
     }
 
 
@@ -255,6 +284,8 @@ def metrics_table(risultati: Dict[str, Any]) -> pd.DataFrame:
         "premi_totali", "intrinseco_totale", "netto_opzioni", "premio_pct_medio",
         "mesi_call_assegnata", "btd_numero", "btd_totale",
         "capitale_medio_impiegato", "finanziamento_massimo", "mesi_a_debito",
+        "btd_prezzo_medio", "btd_quote_comprate", "btd_tagliato_dal_tetto",
+        "btd_segnali_saltati", "btd_calo_peggiore_saltato", "anni_con_tetto_esaurito",
         "ciclo_pnl", "ciclo_cagr", "ciclo_volatilita_annua", "ciclo_sharpe",
         "ciclo_max_dd_pct", "extra_pnl_vs_ciclo", "riduzione_dd_vs_ciclo",
         "extra_cagr_vs_ciclo",
@@ -292,6 +323,12 @@ ETICHETTE = {
     "btd_numero": "Numero di acquisti BTD",
     "btd_totale": "Capitale investito in BTD",
     "capitale_medio_impiegato": "Capitale medio impiegato",
+    "btd_prezzo_medio": "Prezzo medio pagato nei BTD",
+    "btd_quote_comprate": "Quote comprate coi BTD",
+    "btd_tagliato_dal_tetto": "Acquisti BTD tagliati dal tetto annuo",
+    "btd_segnali_saltati": "Segnali BTD saltati per tetto esaurito",
+    "btd_calo_peggiore_saltato": "Il calo piu profondo lasciato scoperto",
+    "anni_con_tetto_esaurito": "Anni in cui il tetto si e esaurito",
     "finanziamento_massimo": "Massimo saldo a debito",
     "mesi_a_debito": "Mesi con saldo a debito",
     "bh_stessi_flussi_pnl": "Utile del B&H a parita di flussi",
@@ -323,7 +360,9 @@ FORMATI = {
     "riduzione_dd_vs_ciclo": "pct", "extra_cagr_vs_ciclo": "pct", "ciclo_sharpe": "num",
     "sharpe": "num", "sortino": "num", "calmar": "num", "bh_sharpe": "num",
     "dd_durata_max_mesi": "int", "mesi_call_assegnata": "int", "btd_numero": "int",
-    "mesi_a_debito": "int",
+    "mesi_a_debito": "int", "btd_segnali_saltati": "int",
+    "anni_con_tetto_esaurito": "int", "btd_quote_comprate": "num",
+    "btd_calo_peggiore_saltato": "pct",
 }
 
 
