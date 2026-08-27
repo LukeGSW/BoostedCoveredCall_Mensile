@@ -104,8 +104,10 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99) -> Dict[str, Any
     mesi = int(len(df))
     positivi = int((r > 0).sum())
 
-    # Buy & Hold a parita' di versamenti: il confronto che conta davvero
+    # Buy & Hold a parita' di versamenti, e il solo sottostante con lo stesso
+    # ciclo annuale: quest'ultimo e' il confronto a parita' di mandato.
     bh = _bh_block(df, confidence)
+    ciclo = _ciclo_block(df)
     riduzione_dd = None
     if maxdd_pct is not None and bh["bh_max_dd_pct"]:
         riduzione_dd = 1.0 - abs(maxdd_pct) / abs(bh["bh_max_dd_pct"])
@@ -169,11 +171,40 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99) -> Dict[str, Any
         "bh_stessi_flussi_finale": _f(df["bh_stessi_flussi"].iloc[-1]),
         "bh_stessi_flussi_pnl": _f(df["bh_stessi_flussi"].iloc[-1] - versamenti),
         **bh,
+        **ciclo,
 
         # Confronto diretto con il benchmark
         "riduzione_dd_vs_bh": _f(riduzione_dd),
         "extra_cagr_vs_bh": _f(extra_cagr),
         "extra_pnl_vs_bh": _f(pnl - (df["bh_stessi_flussi"].iloc[-1] - versamenti)),
+        "extra_pnl_vs_ciclo": _f(pnl - ciclo["ciclo_pnl"]) if ciclo["ciclo_pnl"] is not None else None,
+        "riduzione_dd_vs_ciclo": (
+            _f(1.0 - abs(maxdd_pct) / abs(ciclo["ciclo_max_dd_pct"]))
+            if (maxdd_pct is not None and ciclo["ciclo_max_dd_pct"]) else None),
+        "extra_cagr_vs_ciclo": (
+            _f(ann["cagr"] - ciclo["ciclo_cagr"])
+            if (ann["cagr"] is not None and ciclo["ciclo_cagr"] is not None) else None),
+    }
+
+
+def _ciclo_block(df: pd.DataFrame) -> Dict[str, Any]:
+    """Solo sottostante con lo stesso ciclo annuale: nessuna opzione, nessun BTD."""
+    vuoto = {"ciclo_valore_finale": None, "ciclo_pnl": None, "ciclo_cagr": None,
+             "ciclo_volatilita_annua": None, "ciclo_sharpe": None,
+             "ciclo_max_dd_pct": None, "ciclo_twr_totale": None}
+    if "ciclo_annuale_twr" not in df.columns or df["ciclo_annuale_twr"].isna().all():
+        return vuoto
+    r = df["ciclo_annuale_twr"].fillna(0.0)
+    a = _annualize(r)
+    tot = float(np.prod(1.0 + r.dropna().values)) - 1.0 if len(r.dropna()) else None
+    return {
+        "ciclo_valore_finale": _f(df["ciclo_annuale"].iloc[-1]),
+        "ciclo_pnl": _f(df["ciclo_annuale_pnl"].iloc[-1]),
+        "ciclo_cagr": a["cagr"],
+        "ciclo_volatilita_annua": a["vol"],
+        "ciclo_sharpe": a["sharpe"],
+        "ciclo_max_dd_pct": _f(df["ciclo_annuale_dd"].min()),
+        "ciclo_twr_totale": _f(tot),
     }
 
 
@@ -217,6 +248,9 @@ def metrics_table(risultati: Dict[str, Any]) -> pd.DataFrame:
         "premi_totali", "intrinseco_totale", "netto_opzioni", "premio_pct_medio",
         "mesi_call_assegnata", "btd_numero", "btd_totale",
         "capitale_medio_impiegato", "finanziamento_massimo", "mesi_a_debito",
+        "ciclo_pnl", "ciclo_cagr", "ciclo_volatilita_annua", "ciclo_sharpe",
+        "ciclo_max_dd_pct", "extra_pnl_vs_ciclo", "riduzione_dd_vs_ciclo",
+        "extra_cagr_vs_ciclo",
         "bh_cagr", "bh_volatilita_annua", "bh_sharpe", "bh_max_dd_pct",
         "bh_stessi_flussi_pnl", "riduzione_dd_vs_bh", "extra_cagr_vs_bh", "extra_pnl_vs_bh",
     ]
@@ -254,6 +288,14 @@ ETICHETTE = {
     "finanziamento_massimo": "Massimo saldo a debito",
     "mesi_a_debito": "Mesi con saldo a debito",
     "bh_stessi_flussi_pnl": "Utile del B&H a parita di flussi",
+    "ciclo_pnl": "Utile del solo sottostante, stesso ciclo annuale",
+    "ciclo_cagr": "CAGR del solo sottostante, stesso ciclo",
+    "ciclo_volatilita_annua": "Volatilita annua del solo sottostante",
+    "ciclo_sharpe": "Sharpe del solo sottostante",
+    "ciclo_max_dd_pct": "Max drawdown del solo sottostante (%)",
+    "extra_pnl_vs_ciclo": "Utile in piu rispetto al solo sottostante",
+    "riduzione_dd_vs_ciclo": "Riduzione del drawdown vs solo sottostante",
+    "extra_cagr_vs_ciclo": "CAGR in piu rispetto al solo sottostante",
     "bh_cagr": "CAGR del B&H a parita di flussi",
     "bh_volatilita_annua": "Volatilita annua del B&H",
     "bh_sharpe": "Sharpe del B&H",
@@ -270,6 +312,8 @@ FORMATI = {
     "peggior_mese": "pct", "premio_pct_medio": "pct",
     "bh_cagr": "pct", "bh_volatilita_annua": "pct", "bh_max_dd_pct": "pct",
     "riduzione_dd_vs_bh": "pct", "extra_cagr_vs_bh": "pct",
+    "ciclo_cagr": "pct", "ciclo_volatilita_annua": "pct", "ciclo_max_dd_pct": "pct",
+    "riduzione_dd_vs_ciclo": "pct", "extra_cagr_vs_ciclo": "pct", "ciclo_sharpe": "num",
     "sharpe": "num", "sortino": "num", "calmar": "num", "bh_sharpe": "num",
     "dd_durata_max_mesi": "int", "mesi_call_assegnata": "int", "btd_numero": "int",
     "mesi_a_debito": "int",
