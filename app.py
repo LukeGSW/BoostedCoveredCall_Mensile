@@ -430,6 +430,45 @@ def costruisci_export(risultato: Dict[str, Any],
 # ---------------------------------------------------------------------------
 # Schede
 # ---------------------------------------------------------------------------
+def _con_benchmark(risultato: Dict[str, Any]) -> Dict[str, Any]:
+    """Le tre varianti piu' il benchmark, per le viste che li mostrano insieme."""
+    tutte = dict(risultato.get("varianti", {}))
+    bm = risultato.get("benchmark")
+    if bm and isinstance(bm.get("monthly"), pd.DataFrame) and not bm["monthly"].empty:
+        tutte["benchmark"] = bm
+    return tutte
+
+
+def _avvisi_sottostante(risultato: Dict[str, Any], metriche: Dict[str, Any]) -> None:
+    """Segnala i casi in cui il confronto rischia di essere frainteso."""
+    prezzi = risultato.get("mercato", {}).get("prezzi")
+    if isinstance(prezzi, pd.DataFrame) and not prezzi.empty:
+        moltiplicatore = float(prezzi["Close"].iloc[-1] / prezzi["Open"].iloc[0])
+        anni = len(prezzi) / 12.0
+        if moltiplicatore > 100 and anni > 3:
+            st.warning(
+                f"**Il sottostante si e' moltiplicato per {moltiplicatore:,.0f} volte** in "
+                f"{anni:.0f} anni. Vendere ogni mese una call at-the-money su un rialzo di "
+                f"questa portata significa cedere quasi tutto il guadagno: il costo del cap "
+                f"e' {fmt_currency_compact(metriche.get('intrinseco_totale'))} contro "
+                f"{fmt_currency_compact(metriche.get('premi_totali'))} di premi incassati. "
+                f"Non e' un errore del modello, e' cosa succede a incassare premi su un "
+                f"sottostante che corre. Se vuoi tenere piu' rialzo, abbassa il delta della "
+                f"call nella sidebar."
+            )
+    bh = metriche.get("bh_stessi_flussi_pnl")
+    ciclo = metriche.get("ciclo_pnl")
+    if bh and ciclo and abs(ciclo) > 0 and abs(bh) > 20 * abs(ciclo):
+        st.info(
+            f"Il Buy &amp; Hold che non liquida mai arriva a "
+            f"{fmt_currency_compact(bh)}, cioe' {abs(bh) / abs(ciclo):,.0f} volte il ciclo "
+            f"annuale: tiene per sempre le quote comprate all'inizio, quando il sottostante "
+            f"costava una frazione. Non e' un confronto a parita di mandato ed e' escluso "
+            f"dai grafici a scala lineare, dove renderebbe piatte tutte le altre curve. "
+            f"Lo trovi attivando la scala logaritmica.".replace("&amp;", "&")
+        )
+
+
 def scheda_sintesi(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
     varianti = risultato["varianti"]
     reinvest = varianti.get("premi_reinvest", {}).get("metrics", {})
@@ -453,22 +492,26 @@ def scheda_sintesi(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
          "mesi in cui il cap ha morso", None),
     ])
 
-    dd_cash = cash.get("riduzione_dd_vs_bh")
-    extra_re = reinvest.get("extra_cagr_vs_bh")
+    usa_ciclo = cash.get("ciclo_cagr") is not None
+    metro = ("solo sottostante con lo stesso ciclo annuale" if usa_ciclo
+             else "Buy &amp; Hold a parita di versamenti")
+    dd_cash = cash.get("riduzione_dd_vs_ciclo" if usa_ciclo else "riduzione_dd_vs_bh")
+    extra_re = reinvest.get("extra_cagr_vs_ciclo" if usa_ciclo else "extra_cagr_vs_bh")
     verdetti = []
     if dd_cash is not None:
         verdetti.append(
             f"con i premi tenuti in cassa il drawdown massimo e' "
-            f"<b>{'inferiore' if dd_cash > 0 else 'superiore'} del {abs(dd_cash):.0%}</b> "
-            f"rispetto al Buy &amp; Hold")
+            f"<b>{'inferiore' if dd_cash > 0 else 'superiore'} del {abs(dd_cash):.0%}</b>")
     if extra_re is not None:
         verdetti.append(
             f"reinvestendo i premi il CAGR e' <b>{abs(extra_re):.1%} "
-            f"{'sopra' if extra_re > 0 else 'sotto'}</b> il Buy &amp; Hold")
+            f"{'sopra' if extra_re > 0 else 'sotto'}</b>")
     if verdetti:
-        nota("Sul periodo analizzato, " + " e ".join(verdetti) +
-             ". Il confronto e' a parita' di versamenti: il Buy &amp; Hold riceve gli "
-             "stessi soldi negli stessi mesi.")
+        nota(f"Sul periodo analizzato, rispetto al <b>{metro}</b>, " + " e ".join(verdetti) +
+             ". E' il confronto corretto: stesso capitale impiegato a gennaio e liquidato a "
+             "dicembre, l'unica differenza sono le opzioni e i Buy-The-Dip.")
+
+    _avvisi_sottostante(risultato, cash)
 
     for chiave in ("verdetto_bh", "confronto_equity", "rendimenti_annuali"):
         if chiave in figure:
@@ -709,7 +752,10 @@ def scheda_anno_corrente(risultato: Dict[str, Any], variante: str) -> None:
 
 def scheda_dati(risultato: Dict[str, Any], calibrazione: Optional[Dict[str, Any]]) -> None:
     st.markdown("#### Metriche a confronto")
-    tb = metrics_table(risultato["varianti"])
+    nota("L'ultima colonna e' il solo sottostante comprato e liquidato con lo stesso ciclo "
+         "annuale della strategia: stesso capitale a gennaio, tutto chiuso a dicembre, "
+         "senza opzioni e senza Buy-The-Dip. E' il metro corretto.")
+    tb = metrics_table(_con_benchmark(risultato))
     if not tb.empty:
         vista = pd.DataFrame(
             {col: [format_value(k, tb.loc[k, col]) for k in tb.index] for col in tb.columns},
@@ -723,13 +769,28 @@ def scheda_dati(risultato: Dict[str, Any], calibrazione: Optional[Dict[str, Any]
     y = risultato["varianti"][scelta]["yearly"]
     if not y.empty:
         vista_y = y.copy()
-        for c in ("rendimento_sottostante", "twr_anno"):
-            vista_y[c] = vista_y[c].map(lambda v: fmt_pct(v, 1))
+        # Ogni anno affiancato a quello che avrebbe fatto il solo sottostante
+        bm = risultato.get("benchmark") or {}
+        yb = bm.get("yearly")
+        if isinstance(yb, pd.DataFrame) and not yb.empty:
+            vista_y["risultato_buy_hold"] = yb["risultato_anno"].reindex(vista_y.index)
+            vista_y["twr_buy_hold"] = yb["twr_anno"].reindex(vista_y.index)
+            vista_y["differenza"] = vista_y["risultato_anno"] - vista_y["risultato_buy_hold"]
+            vista_y["differenza_twr"] = vista_y["twr_anno"] - vista_y["twr_buy_hold"]
+        for c in ("rendimento_sottostante", "twr_anno", "twr_buy_hold", "differenza_twr"):
+            if c in vista_y.columns:
+                vista_y[c] = vista_y[c].map(lambda v: fmt_pct(v, 1))
         for c in ("premi_incassati", "intrinseco_pagato", "netto_opzioni", "btd_investito",
-                  "versamenti", "capitale_medio_impiegato", "valore_fine_anno", "risultato_anno"):
-            vista_y[c] = vista_y[c].map(lambda v: f"${v:,.0f}")
-        vista_y.columns = [c.replace("_", " ").capitalize() for c in vista_y.columns]
+                  "btd_da_calo", "btd_da_boost", "versamenti", "capitale_medio_impiegato",
+                  "valore_fine_anno", "risultato_anno", "risultato_buy_hold", "differenza"):
+            if c in vista_y.columns:
+                vista_y[c] = vista_y[c].map(lambda v: "—" if pd.isna(v) else f"${v:,.0f}")
+        vista_y.columns = [c.replace("_", " ").replace("twr", "TWR").capitalize()
+                           for c in vista_y.columns]
         st.dataframe(vista_y, **LARGO)
+        st.caption("Le ultime colonne confrontano ogni anno con il solo sottostante che "
+                   "segue lo stesso ciclo annuale: 'Differenza' positiva significa che la "
+                   "strategia ha fatto meglio in quell'anno.")
 
     st.markdown("#### Serie mensile")
     mdf = risultato["varianti"][scelta]["monthly"]
