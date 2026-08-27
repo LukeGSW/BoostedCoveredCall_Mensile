@@ -193,6 +193,20 @@ def _serie_varianti(risultato: Dict[str, Any], colonna: str) -> Dict[str, pd.Ser
     return out
 
 
+def _serie_giornaliere(risultato: Dict[str, Any], colonna: str) -> Dict[str, pd.Series]:
+    """Come `_serie_varianti`, ma sulla serie valorizzata giorno per giorno."""
+    out: Dict[str, pd.Series] = {}
+    for chiave, res in risultato.get("varianti", {}).items():
+        df = res.get("daily")
+        if isinstance(df, pd.DataFrame) and not df.empty and colonna in df.columns:
+            out[chiave] = df[colonna]
+    return out
+
+
+def _ha_giornaliero(risultato: Dict[str, Any]) -> bool:
+    return bool(_serie_giornaliere(risultato, "valore_portafoglio"))
+
+
 # ============================================================================
 # 1. Confronto di tutte le equity
 # ============================================================================
@@ -378,21 +392,29 @@ def fig_equity_drawdown(risultato: Dict[str, Any], chiave: str) -> go.Figure:
     # lavorare piu' capitale, quindi la strategia puo' perdere piu' dollari pur
     # perdendo una percentuale molto minore. La percentuale e' l'unica misura
     # confrontabile, ed e' la stessa che finisce nella tabella delle metriche.
-    dd = df["dd_twr_pct"]
+    # Quando c'e', si usa la serie valorizzata ogni giorno: quella di periodo
+    # non vede i crolli rientrati prima della chiusura della barra.
+    gio = res.get("daily")
+    ogni_giorno = isinstance(gio, pd.DataFrame) and not gio.empty
+    dd = gio["dd_twr_pct"] if ogni_giorno else df["dd_twr_pct"]
     if bm is not None:
-        sb = bm["monthly"]["dd_twr_pct"]
+        gio_bm = bm.get("daily")
+        fonte_bm = (gio_bm if (ogni_giorno and isinstance(gio_bm, pd.DataFrame)
+                               and not gio_bm.empty) else bm["monthly"])
+        sb = fonte_bm["dd_twr_pct"]
         _traccia_benchmark(fig, sb.index, sb.values,
                            f"Drawdown del {bm['label']}", riempi=True, riga=2)
         fig.data[-1].update(hovertemplate=HT_PCT)
     fig.add_trace(go.Scatter(
-        x=dd.index, y=dd.values, name="Drawdown del conto",
+        x=dd.index, y=dd.values,
+        name="Drawdown del conto" + (" (ogni giorno)" if ogni_giorno else ""),
         line=dict(color=PALETTE["drawdown"], width=1.6),
         fill="tozeroy", fillcolor="rgba(244,63,94,0.22)",
         hovertemplate=HT_PCT), row=2, col=1)
 
     peggiore = dd.idxmin() if dd.notna().any() else None
     if peggiore is not None and dd.min() < 0:
-        in_valuta = float(df["dd_valore"].min())
+        in_valuta = float((gio if ogni_giorno else df)["dd_valore"].min())
         fig.add_annotation(
             x=peggiore, y=dd.min(), row=2, col=1,
             text=f"{dd.min():.1%} (${in_valuta:,.0f})",
@@ -408,7 +430,10 @@ def fig_equity_drawdown(risultato: Dict[str, Any], chiave: str) -> go.Figure:
     capitale = float(((df["quote_coperte"] + df["quote_extra"]) * df["close"]).mean())
     sotto = ("In alto il conto, il denaro entrato dall'esterno (che non si azzera mai: e' il "
              "metro dell'utile) e il capitale al lavoro nel ciclo in corso (che riparte a "
-             "ogni gennaio); in basso la discesa dal massimo, in percentuale.")
+             "ogni gennaio); in basso la discesa dal massimo, in percentuale, "
+             + ("valorizzando il conto ogni giorno di borsa."
+                if ogni_giorno else
+                "valorizzata solo alla chiusura di ogni periodo."))
     if bm is not None:
         cap_bm = float(((bm["monthly"]["quote_coperte"] + bm["monthly"]["quote_extra"])
                         * bm["monthly"]["close"]).mean())
@@ -423,14 +448,22 @@ def fig_equity_drawdown(risultato: Dict[str, Any], chiave: str) -> go.Figure:
 # 4. Underwater comparato
 # ============================================================================
 def fig_underwater(risultato: Dict[str, Any]) -> go.Figure:
-    serie = _serie_varianti(risultato, "dd_twr_pct")
+    # Quando c'e' la valorizzazione giornaliera e' quella a comandare: il
+    # drawdown misurato sulle sole chiusure di periodo salta i crolli rientrati
+    # prima della fine della barra, ed e' sistematicamente piu' tenero del vero.
+    giornaliero = _ha_giornaliero(risultato)
+    serie = (_serie_giornaliere(risultato, "dd_twr_pct") if giornaliero
+             else _serie_varianti(risultato, "dd_twr_pct"))
     if not serie:
         return _vuoto("Nessun dato disponibile")
     fig = go.Figure()
     rif = next(iter(risultato["varianti"].values()))["monthly"]
     bm = _benchmark(risultato)
     if bm is not None:
-        s = bm["monthly"]["dd_twr_pct"]
+        fonte = bm.get("daily") if giornaliero else bm.get("monthly")
+        if not isinstance(fonte, pd.DataFrame) or fonte.empty:
+            fonte = bm["monthly"]
+        s = fonte["dd_twr_pct"]
         _traccia_benchmark(fig, s.index, s.values, bm["label"], riempi=True)
         fig.data[-1].update(hovertemplate=HT_PCT)
     if "bh_dd_twr_pct" in rif.columns:
@@ -450,10 +483,14 @@ def fig_underwater(risultato: Dict[str, Any]) -> go.Figure:
             hovertemplate=HT_PCT))
     fig.update_yaxes(tickformat=".0%", title_text="Drawdown")
     _asse_tempo(fig)
+    quando = ("valorizzando il conto <b>ogni giorno di borsa</b>"
+              if giornaliero else
+              "valorizzando il conto <b>solo alla chiusura di ogni periodo</b>, quindi "
+              "senza i crolli rientrati prima della chiusura")
     return _layout(fig, "Drawdown a confronto",
-                   "Percentuale calcolata sul rendimento time-weighted, quindi ripulita dai "
-                   "versamenti. La linea punteggiata e' il Buy & Hold con gli stessi versamenti: "
-                   "il premio incassato in cash dovrebbe tenerla sopra le altre.",
+                   f"Percentuale calcolata sul rendimento time-weighted, quindi ripulita dai "
+                   f"versamenti, {quando}. La linea punteggiata e' il Buy & Hold con gli stessi "
+                   f"versamenti: il premio incassato in cash dovrebbe tenerla sopra le altre.",
                    altezza=420)
 
 
@@ -466,9 +503,17 @@ def fig_verdetto_vs_bh(risultato: Dict[str, Any]) -> go.Figure:
     # mandato, stessa liquidazione a dicembre, unica differenza le opzioni e i BTD.
     prima = next(iter(risultato.get("varianti", {}).values()), {}).get("metrics") or {}
     usa_ciclo = prima.get("ciclo_rendimento_medio") is not None
-    k_dd = "riduzione_dd_vs_ciclo" if usa_ciclo else "riduzione_dd_vs_bh"
+    # Se il conto e' stato valorizzato ogni giorno, il confronto sul drawdown usa
+    # quei numeri: sono gli unici che vedono i crolli rientrati dentro la barra.
+    ogni_giorno = prima.get("riduzione_dd_giornaliera_vs_ciclo") is not None
+    k_dd = ("riduzione_dd_giornaliera_vs_ciclo" if ogni_giorno
+            else ("riduzione_dd_vs_ciclo" if usa_ciclo else "riduzione_dd_vs_bh"))
     k_rend = "extra_rendimento_vs_ciclo"
-    k_mio_dd, k_suo_dd = "max_dd_pct", ("ciclo_max_dd_pct" if usa_ciclo else "bh_max_dd_pct")
+    if ogni_giorno:
+        k_mio_dd, k_suo_dd = "max_dd_giornaliero_pct", "ciclo_max_dd_giornaliero_pct"
+    else:
+        k_mio_dd = "max_dd_pct"
+        k_suo_dd = "ciclo_max_dd_pct" if usa_ciclo else "bh_max_dd_pct"
     k_mio_c, k_suo_c = "rendimento_medio", "ciclo_rendimento_medio"
     metro = "solo sottostante, stesso ciclo annuale" if usa_ciclo else "Buy & Hold"
 
@@ -485,8 +530,9 @@ def fig_verdetto_vs_bh(risultato: Dict[str, Any]) -> go.Figure:
     etichette = [r[0] for r in righe]
     colori = [r[3] for r in righe]
     fig = make_subplots(rows=1, cols=2, horizontal_spacing=0.14,
-                        subplot_titles=(f"Drawdown in meno del {metro}",
-                                        f"Rendimento in piu del {metro}"))
+                        subplot_titles=(
+                            f"Drawdown{' vero' if ogni_giorno else ''} in meno del {metro}",
+                            f"Rendimento in piu del {metro}"))
 
     fig.add_trace(go.Bar(
         y=etichette, x=[r[1] for r in righe], orientation="h", showlegend=False,
@@ -1062,3 +1108,123 @@ def fig_calibrazione(cal: Dict[str, Any]) -> go.Figure:
            f"bias {m.get('bias', float('nan')) * 100:+.2f} · "
            f"R² {m.get('r2', float('nan')):.3f} · {m.get('n', 0)} osservazioni")
     return _layout(fig, "Calibrazione del premio sui prezzi reali", sub, altezza=440)
+
+
+# ============================================================================
+# 17. Valorizzazione: ogni giorno contro le sole chiusure di periodo
+# ============================================================================
+def fig_valorizzazione(risultato: Dict[str, Any], chiave: str = "premi_cash") -> go.Figure:
+    """Quanto nascondeva guardare il conto una volta per barra.
+
+    Sopra le due curve del valore, sotto i due drawdown. La banda scura sotto la
+    curva giornaliera e' il minimo di giornata: il punto piu' basso in cui il
+    conto e' stato visto, che nessuna delle due valorizzazioni registra.
+    """
+    res = risultato.get("varianti", {}).get(chiave)
+    if not res or not isinstance(res.get("monthly"), pd.DataFrame) or res["monthly"].empty:
+        return _vuoto("Nessun dato disponibile")
+    gio = res.get("daily")
+    if not isinstance(gio, pd.DataFrame) or gio.empty:
+        return _vuoto("Servono i dati giornalieri per valorizzare il conto ogni giorno")
+
+    per = res["monthly"]
+    colore = COLORE_VARIANTE.get(chiave, PALETTE["text"])
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.58, 0.42], vertical_spacing=0.07)
+
+    # --- valore
+    fig.add_trace(go.Scatter(
+        x=gio.index, y=gio["valore_minimo"].values, name="Minimo di giornata",
+        line=dict(color=PALETTE["drawdown"], width=0), showlegend=False,
+        hovertemplate="Minimo di giornata: <b>$%{y:,.0f}</b><extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=gio.index, y=gio["valore_portafoglio"].values, name="Valore ogni giorno",
+        line=dict(color=colore, width=1.6), fill="tonexty",
+        fillcolor=_rgba(PALETTE["drawdown"], 0.13),
+        hovertemplate="Ogni giorno: <b>$%{y:,.0f}</b><extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=per.index, y=per["valore_portafoglio"].values,
+        name="Valore a fine periodo", mode="lines+markers",
+        line=dict(color=PALETTE["text_muted"], width=1.4, dash="dot"),
+        marker=dict(size=4, color=PALETTE["text_muted"]),
+        hovertemplate="Fine periodo: <b>$%{y:,.0f}</b><extra></extra>"), row=1, col=1)
+
+    # --- drawdown
+    fig.add_trace(go.Scatter(
+        x=gio.index, y=gio["dd_intraday_pct"].values, name="Peggio visto in giornata",
+        line=dict(color=PALETTE["drawdown"], width=0.9, dash="dot"),
+        fill="tozeroy", fillcolor=_rgba(PALETTE["drawdown"], 0.10),
+        hovertemplate=HT_PCT), row=2, col=1)
+    fig.add_trace(go.Scatter(
+        x=gio.index, y=gio["dd_twr_pct"].values, name="Drawdown vero (ogni giorno)",
+        line=dict(color=colore, width=1.7),
+        fill="tozeroy", fillcolor=_rgba(colore, 0.16),
+        hovertemplate=HT_PCT), row=2, col=1)
+    fig.add_trace(go.Scatter(
+        x=per.index, y=per["dd_twr_pct"].values, name="Drawdown a fine periodo",
+        line=dict(color=PALETTE["text_muted"], width=1.5, dash="dash"),
+        hovertemplate=HT_PCT), row=2, col=1)
+
+    _bande_anni(fig, gio.index, riga=1)
+    fig.update_yaxes(tickprefix="$", title_text="Valore del conto", row=1, col=1)
+    fig.update_yaxes(tickformat=".0%", title_text="Drawdown", row=2, col=1)
+    _asse_tempo(fig, selettore=False, riga=1)
+    _asse_tempo(fig, selettore=False, riga=2)
+
+    mt = res.get("metrics", {})
+    vero = mt.get("max_dd_giornaliero_pct")
+    periodo = mt.get("max_dd_pct")
+    intra = mt.get("max_dd_intraday_pct")
+    pezzi = []
+    if vero is not None and periodo is not None:
+        pezzi.append(f"drawdown vero <b>{vero:.1%}</b> contro il {periodo:.1%} che si "
+                     f"leggeva sulle sole chiusure")
+        if intra is not None:
+            pezzi.append(f"sui minimi di giornata si e' arrivati a {intra:.1%}")
+    return _layout(fig, f"Valorizzazione giornaliera — {res['label']}",
+                   ("; ".join(pezzi) + "." if pezzi else
+                    "Il conto rivalutato con i prezzi di ogni giorno."),
+                   altezza=620, cad=_cadenza(risultato))
+
+
+# ============================================================================
+# 18. Quanto nascondeva la frequenza di valorizzazione
+# ============================================================================
+def fig_dd_per_frequenza(risultato: Dict[str, Any]) -> go.Figure:
+    """Lo stesso drawdown misurato in tre modi, curva per curva."""
+    tutte = dict(risultato.get("varianti", {}))
+    bm = _benchmark(risultato)
+    if bm is not None:
+        tutte["benchmark"] = bm
+
+    nomi, fine_per, ogni_giorno, minimi = [], [], [], []
+    for chiave, res in tutte.items():
+        mt = res.get("metrics") or {}
+        if mt.get("max_dd_giornaliero_pct") is None:
+            continue
+        nomi.append(res.get("label", chiave))
+        fine_per.append(abs(mt.get("max_dd_pct") or 0.0))
+        ogni_giorno.append(abs(mt.get("max_dd_giornaliero_pct") or 0.0))
+        minimi.append(abs(mt.get("max_dd_intraday_pct") or 0.0))
+    if not nomi:
+        return _vuoto("Servono i dati giornalieri per confrontare le frequenze")
+
+    fig = go.Figure()
+    for etichetta, valori, colore in (
+            ("Alla chiusura di periodo", fine_per, PALETTE["text_muted"]),
+            ("Valorizzando ogni giorno", ogni_giorno, PALETTE["drawdown"]),
+            ("Sui minimi di giornata", minimi, PALETTE["intrinseco"])):
+        fig.add_trace(go.Bar(
+            x=nomi, y=valori, name=etichetta, marker=dict(color=colore),
+            text=[f"{v:.1%}" for v in valori], textposition="outside",
+            textfont=dict(size=10, family=FONT_MONO),
+            hovertemplate="%{fullData.name}<br>%{x}: <b>%{y:.2%}</b><extra></extra>"))
+
+    nascosto = max((g - f) for g, f in zip(ogni_giorno, fine_per))
+    fig.update_layout(barmode="group", bargap=0.28, bargroupgap=0.08)
+    fig.update_yaxes(tickformat=".0%", title_text="Massimo drawdown", rangemode="tozero")
+    fig.update_xaxes(showgrid=False)
+    return _layout(fig, "Quanto nascondeva la frequenza di valorizzazione",
+                   f"Lo stesso identico percorso, misurato con tre frequenze diverse. "
+                   f"Guardare il conto una volta per barra sottostimava il drawdown fino a "
+                   f"<b>{nascosto:.1%}</b>.", altezza=440)
