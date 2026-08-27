@@ -1,18 +1,27 @@
-"""Motore di backtest della Boosted Covered Call mensile.
+"""Motore di backtest della Boosted Covered Call, mensile o settimanale.
 
-Modello (una riga = un mese di calendario):
+La cadenza decide solo quanto e' lungo il passo elementare: `cadenza="mensile"`
+lavora su barre mensili e vende call a scadenza mensile, `cadenza="settimanale"`
+lavora su barre settimanali e vende call a scadenza settimanale. Tutto il resto
+del modello e' identico, e in particolare TUTTO CIO CHE E ANNUALE resta invariato:
+il capitale si decide a gennaio, si liquida a dicembre, si ricomincia. Cambia il
+ritmo, non la struttura.
+
+Modello (una riga = un periodo, mese o settimana):
 
   * A inizio anno si impiega un CAPITALE FISSO (`capitale_iniziale`) comprando
     quote all'open di gennaio: sono le quote COPERTE dalla covered call e
     restano costanti per tutto l'anno.
-  * Ogni mese si vende una call a delta ~0.50 con scadenza a fine mese e si
-    incassa un premio pari a una percentuale del valore corrente del
-    sottostante (quindi diverso ogni mese: N * open_mese * premio_pct).
+  * Ogni periodo si vende una call a delta ~0.50 con scadenza a fine periodo e
+    si incassa un premio pari a una percentuale del valore corrente del
+    sottostante (quindi diverso ogni volta: N * open_periodo * premio_pct).
+    Sulla cadenza settimanale la call dura sette giorni invece di trenta: il
+    singolo premio vale circa la meta', ma se ne incassano 52 invece di 12.
   * A scadenza, se la call e' in-the-money la si riacquista al valore
     intrinseco pagando in contanti: le quote restano le stesse. E' qui che si
     paga il costo del cap sull'upside, e il costo si accumula davvero.
-  * Quando il sottostante ha un mese negativo scatta il Buy-The-Dip: si
-    acquista |rendimento del mese precedente| * capitale_iniziale, piu' il
+  * Quando il sottostante ha un periodo negativo scatta il Buy-The-Dip: si
+    acquista |rendimento del periodo precedente| * capitale_iniziale, piu' il
     BOOST, una percentuale fissa del capitale iniziale che si aggiunge a ogni
     acquisto. Le due quote sono tracciate separatamente in `btd_quota_calo` e
     `btd_quota_boost`. Non sono coperte dalla call e vengono liquidate a fine
@@ -40,6 +49,11 @@ Contabilita': due grandezze diverse, da non confondere.
     ciclo in corso: capitale fisso piu' i Buy-The-Dip accumulati nell'anno.
     Questo SI azzera a ogni gennaio, insieme a tutto il resto.
 I rendimenti sono time-weighted, quindi ripuliti dai flussi.
+
+Nomi delle colonne: restano quelli storici (`rendimento_mese`, `twr_mese`,
+`versamento_mese`) anche in cadenza settimanale, dove vanno letti come "del
+periodo". Cambiarli avrebbe rotto export, grafici e file gia' salvati senza
+aggiungere nulla: e' la UI a chiamarli col nome giusto.
 """
 from __future__ import annotations
 
@@ -49,6 +63,9 @@ from typing import Dict, List, Optional, Any
 import numpy as np
 import pandas as pd
 
+from .cadenza import CADENZE, PERIODI_ANNO
+from .cadenza import normalizza as CADENZA_VALIDA
+from .cadenza import periodi_anno
 from .pricing import PremiumModel, bs_call_price, strike_for_delta
 from . import vol as volmod
 
@@ -61,6 +78,13 @@ class BacktestConfig:
     ticker: str = "BTC-USD.CC"
     start_date: str = "2018-01-01"
     end_date: Optional[str] = None
+
+    # Passo elementare del backtest.
+    #   "mensile"     barre mensili, call a scadenza mensile: 12 cicli l'anno.
+    #   "settimanale" barre settimanali, call a scadenza settimanale: 52 cicli
+    #                 l'anno. Piu' premi incassati e molti piu' acquisti sui
+    #                 cali, quindi piu' aggressiva. Il ciclo ANNUALE non cambia.
+    cadenza: str = "mensile"
 
     # Capitale
     capitale_iniziale: float = 25_000.0        # base coperta, fissata a inizio anno
@@ -121,6 +145,15 @@ class BacktestConfig:
     debit_cash_rate: float = 0.06              # costo del saldo a debito (vedi sotto)
     var_confidence: float = 0.99
 
+    @property
+    def settimanale(self) -> bool:
+        return str(self.cadenza) == "settimanale"
+
+    @property
+    def periodi_anno(self) -> int:
+        """Quanti passi elementari entrano in un anno: divisore di interessi e metriche."""
+        return PERIODI_ANNO[CADENZA_VALIDA(self.cadenza)]
+
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d["premium_model"] = self.premium_model.to_dict()
@@ -156,6 +189,30 @@ def _month_days(ts: pd.Timestamp) -> int:
     return int(ts.days_in_month)
 
 
+def _inizio_periodo(ts: pd.Timestamp, cadenza: str) -> pd.Timestamp:
+    """Primo giorno del periodo a cui appartiene la barra.
+
+    E' il momento in cui si impiega il capitale e si fissa lo strike, ed e'
+    anche il taglio anti-look-ahead: la volatilita' usata per prezzare il premio
+    deve essere quella nota STRETTAMENTE prima di questo istante.
+
+    Sulla cadenza settimanale si risale al lunedi della settimana della barra,
+    che e' corretto sia che il fornitore dati indicizzi la barra al primo giorno
+    della settimana sia che la indicizzi all'ultimo.
+    """
+    ts = pd.Timestamp(ts)
+    if CADENZA_VALIDA(cadenza) == "settimanale":
+        return (ts - pd.Timedelta(days=int(ts.weekday()))).normalize()
+    return _month_start(ts)
+
+
+def _giorni_periodo(ts: pd.Timestamp, cadenza: str) -> int:
+    """Durata in giorni di calendario del periodo: e' la vita della call venduta."""
+    if CADENZA_VALIDA(cadenza) == "settimanale":
+        return 7
+    return _month_days(ts)
+
+
 # ----------------------------------------------------------------------------
 # Preparazione dati
 # ----------------------------------------------------------------------------
@@ -165,13 +222,33 @@ def prepare_market_data(
     daily: Optional[pd.DataFrame],
     cfg: BacktestConfig,
 ) -> Dict[str, Any]:
-    """Normalizza i dati e calcola segnali e volatilita' realizzata."""
-    warnings: List[str] = []
+    """Normalizza i dati e calcola segnali e volatilita' realizzata.
 
-    m = monthly.copy()
+    La cadenza sceglie quale serie guida il backtest: quella mensile o quella
+    settimanale. La serie settimanale resta comunque usata per intero, warm-up
+    compreso, dal filtro sul drawdown.
+    """
+    warnings: List[str] = []
+    cadenza = CADENZA_VALIDA(cfg.cadenza)
+    ppa = PERIODI_ANNO[cadenza]
+
+    if cadenza == "settimanale":
+        if weekly is None or weekly.empty:
+            raise ValueError("Cadenza settimanale richiesta ma la serie settimanale non e' disponibile.")
+        m = weekly.copy()
+        # La serie settimanale viene scaricata con un warm-up di due anni per il
+        # filtro sul drawdown: senza questo taglio il backtest partirebbe molto
+        # prima della data chiesta dall'utente.
+        if cfg.start_date:
+            m = m[m.index >= pd.Timestamp(cfg.start_date)]
+        if cfg.end_date:
+            m = m[m.index <= pd.Timestamp(cfg.end_date)]
+    else:
+        m = monthly.copy()
+
     m = m[~m.index.duplicated(keep="last")].sort_index()
     m["rendimento_mese"] = m["Close"].pct_change()
-    # Il segnale del mese i guarda il mese i-1: nessun look-ahead.
+    # Il segnale del periodo i guarda il periodo i-1: nessun look-ahead.
     m["segnale_btd"] = (m["rendimento_mese"] < 0).shift(1).fillna(False).astype(bool)
 
     dd_weekly = pd.Series(dtype=float)
@@ -191,15 +268,16 @@ def prepare_market_data(
         )
         vol_source = f"giornaliero / {volmod.VOL_MODELS.get(cfg.vol_model, cfg.vol_model)}"
     else:
-        vol_series = volmod.vol_from_monthly(m)
-        vol_source = "mensile (fallback)"
+        vol_series = volmod.vol_from_periods(m, periodi_anno=ppa)
+        vol_source = f"{cadenza} (fallback)"
         warnings.append(
-            "Dati giornalieri non disponibili: la volatilita' e' stimata dai rendimenti "
-            "mensili ed e' molto meno precisa."
+            f"Dati giornalieri non disponibili: la volatilita' e' stimata dai rendimenti "
+            f"{'settimanali' if cadenza == 'settimanale' else 'mensili'} ed e' molto meno precisa."
         )
 
     return {"monthly": m, "dd_weekly": dd_weekly, "vol": vol_series,
-            "vol_source": vol_source, "warnings": warnings}
+            "vol_source": vol_source, "warnings": warnings,
+            "cadenza": cadenza, "periodi_anno": ppa}
 
 
 # ----------------------------------------------------------------------------
@@ -218,6 +296,8 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
     m: pd.DataFrame = market["monthly"]
     dd_weekly: pd.Series = market["dd_weekly"]
     vol_series: pd.Series = market["vol"]
+    cadenza = CADENZA_VALIDA(market.get("cadenza", cfg.cadenza))
+    ppa = float(market.get("periodi_anno", PERIODI_ANNO[cadenza]))
 
     cap0_base = float(cfg.capitale_iniziale)
     cap_add_base = float(cfg.capitale_addizionale)
@@ -232,8 +312,10 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
                  if cfg.btd_cap_annuo_pct else float('inf'))
     boost_per_acquisto = cap0 * float(cfg.boost_pct)
     pm = cfg.premium_model
-    idle_m = float(cfg.idle_cash_rate) / 12.0
-    debito_m = float(cfg.debit_cash_rate) / 12.0
+    # I tassi annui vanno ripartiti sul passo effettivo: dodicesimi sulla
+    # cadenza mensile, cinquantaduesimi su quella settimanale.
+    idle_m = float(cfg.idle_cash_rate) / ppa
+    debito_m = float(cfg.debit_cash_rate) / ppa
 
     # Stato del conto
     cassa = 0.0            # liquidita' operativa: capitale, liquidazioni, BTD
@@ -256,7 +338,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
         if not (np.isfinite(O) and np.isfinite(C) and O > 0 and C > 0):
             continue
 
-        ms = _month_start(data)
+        ms = _inizio_periodo(data, cadenza)
         versato_mese = 0.0
         liquidazione = 0.0
         nuovo_anno = (anno_corrente is None) or (data.year != anno_corrente)
@@ -311,7 +393,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
 
         # ---------------- Premio della call ----------------
         sigma = volmod.sigma_at(vol_series, ms, fallback=np.nan)
-        T = _month_days(data) / 365.0
+        T = _giorni_periodo(data, cadenza) / 365.0
         strike = np.nan
         premio_pct = 0.0
         premio = 0.0
@@ -469,7 +551,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
     df["bh_pnl_netto"] = df["bh_stessi_flussi"] - df["versamenti_cum"]
 
     return {"variant": variant, "label": spec["label"], "monthly": df,
-            "yearly": _yearly_table(df), "metrics": {}}
+            "yearly": _yearly_table(df), "metrics": {}, "cadenza": cadenza}
 
 
 # ----------------------------------------------------------------------------
@@ -492,7 +574,7 @@ def _yearly_table(df: pd.DataFrame) -> pd.DataFrame:
         capitale_investito = float(g["capitale_impiegato_anno"].iloc[-1])
         out.append({
             "anno": int(anno),
-            "mesi": int(len(g)),
+            "periodi": int(len(g)),
             "capitale_investito": capitale_investito,
             "rendimento_anno": (risultato / capitale_investito
                                 if capitale_investito > 0 else float("nan")),
@@ -526,10 +608,11 @@ def _yearly_table(df: pd.DataFrame) -> pd.DataFrame:
 # ----------------------------------------------------------------------------
 def dettaglio_anno(risultato: Dict[str, Any], variante: str = "premi_cash",
                    anno: Optional[int] = None) -> Dict[str, Any]:
-    """Fotografia mese per mese di un singolo anno, per seguire la strategia dal vivo.
+    """Fotografia periodo per periodo di un singolo anno, per seguire la strategia dal vivo.
 
     Senza `anno` restituisce l'ultimo presente nel backtest, cioe' quello in
-    corso quando il backtest arriva a oggi.
+    corso quando il backtest arriva a oggi. La chiave `mesi` resta per
+    compatibilita' e contiene le barre del periodo, mensili o settimanali.
     """
     res = (risultato.get("varianti") or {}).get(variante)
     if not res or res["monthly"].empty:
@@ -554,6 +637,8 @@ def dettaglio_anno(risultato: Dict[str, Any], variante: str = "premi_cash",
     return {
         "anno": anno,
         "mesi": g,
+        "periodi": g,
+        "cadenza": CADENZA_VALIDA(cfg.get("cadenza", "mensile")),
         "riepilogo": {
             "mesi_trascorsi": int(len(g)),
             "capitale_fisso": cap0,
@@ -591,20 +676,24 @@ def dettaglio_anno(risultato: Dict[str, Any], variante: str = "premi_cash",
 
 
 def piano_prossimo_mese(risultato: Dict[str, Any], variante: str = "premi_cash") -> Dict[str, Any]:
-    """Cosa fara' la strategia il mese prossimo, con i dati disponibili oggi.
+    """Cosa fara' la strategia il periodo prossimo, con i dati disponibili oggi.
 
-    Tutte le grandezze sono gia' determinate dalla chiusura dell'ultimo mese:
+    Tutte le grandezze sono gia' determinate dalla chiusura dell'ultimo periodo:
     il segnale guarda indietro, la volatilita' e' quella nota, e l'unica cosa
-    che manca e' il prezzo di apertura del mese, quindi gli importi in quote
-    sono indicativi mentre quelli in valuta sono esatti.
+    che manca e' il prezzo di apertura, quindi gli importi in quote sono
+    indicativi mentre quelli in valuta sono esatti.
     """
     res = (risultato.get("varianti") or {}).get(variante)
     if not res or res["monthly"].empty:
         return {}
     df: pd.DataFrame = res["monthly"]
     cfg = risultato.get("config", {})
+    cadenza = CADENZA_VALIDA(cfg.get("cadenza", "mensile"))
     ultima = df.iloc[-1]
-    prossimo = (pd.Timestamp(df.index[-1]) + pd.offsets.MonthBegin(1))
+    if cadenza == "settimanale":
+        prossimo = _inizio_periodo(pd.Timestamp(df.index[-1]), cadenza) + pd.Timedelta(days=7)
+    else:
+        prossimo = pd.Timestamp(df.index[-1]) + pd.offsets.MonthBegin(1)
     nuovo_anno = int(prossimo.year) != int(ultima["anno"])
 
     cap0 = float(cfg.get("capitale_iniziale", 0.0))
@@ -643,14 +732,18 @@ def piano_prossimo_mese(risultato: Dict[str, Any], variante: str = "premi_cash")
                          if k in PremiumModel.__dataclass_fields__})
     sigma = float(ultima["sigma_stimata"]) if pd.notna(ultima["sigma_stimata"]) else np.nan
     spot = float(ultima["close"])
-    T = int(prossimo.days_in_month) / 365.0
+    T = _giorni_periodo(prossimo, cadenza) / 365.0
     quote_coperte = 0.0 if nuovo_anno else float(ultima["quote_coperte"])
     quota_prem: Dict[str, float] = {}
     if np.isfinite(sigma) and sigma > 0:
         quota_prem = pm.quote(spot, sigma, T)
 
+    etichetta = (prossimo.strftime("settimana del %d/%m/%Y") if cadenza == "settimanale"
+                 else prossimo.strftime("%Y-%m"))
     return {
-        "mese": prossimo.strftime("%Y-%m"),
+        "mese": etichetta,
+        "periodo": etichetta,
+        "cadenza": cadenza,
         "reset_annuale": nuovo_anno,
         "capitale_da_impiegare": (cap0 + cap_add) if nuovo_anno else 0.0,
         "prezzo_riferimento": spot,
@@ -685,12 +778,22 @@ def run_backtest(
     """Esegue le tre varianti piu' i benchmark. Non produce grafici."""
     from .metrics import compute_metrics    # import locale: evita cicli
 
-    if monthly is None or monthly.empty or len(monthly) < 2:
-        return {"ok": False, "errore": "Serie mensile vuota o troppo corta.",
+    cadenza = CADENZA_VALIDA(cfg.cadenza)
+    ppa = PERIODI_ANNO[cadenza]
+    sorgente = weekly if cadenza == "settimanale" else monthly
+    if sorgente is None or sorgente.empty or len(sorgente) < 2:
+        manca = "settimanale" if cadenza == "settimanale" else "mensile"
+        return {"ok": False,
+                "errore": f"Serie {manca} vuota o troppo corta per questo ticker.",
                 "config": cfg.to_dict(), "varianti": {}, "warnings": []}
 
     market = prepare_market_data(monthly, weekly, daily, cfg)
     m = market["monthly"]
+    if m.empty or len(m) < 2:
+        return {"ok": False,
+                "errore": (f"Nella finestra richiesta ci sono meno di due barre "
+                           f"{'settimanali' if cadenza == 'settimanale' else 'mensili'}."),
+                "config": cfg.to_dict(), "varianti": {}, "warnings": market["warnings"]}
 
     benchmark = run_variant(market, cfg, BENCHMARK)
     bm = benchmark["monthly"]
@@ -705,11 +808,11 @@ def run_backtest(
             res["monthly"]["ciclo_annuale_twr"] = bm["twr_mese"].reindex(idx)
             res["monthly"]["ciclo_annuale_dd"] = bm["dd_twr_pct"].reindex(idx)
         if not res["monthly"].empty:
-            res["metrics"] = compute_metrics(res["monthly"], cfg.var_confidence)
+            res["metrics"] = compute_metrics(res["monthly"], cfg.var_confidence, ppa)
         risultati[name] = res
 
     if not bm.empty:
-        benchmark["metrics"] = compute_metrics(bm, cfg.var_confidence)
+        benchmark["metrics"] = compute_metrics(bm, cfg.var_confidence, ppa)
         # Confronto col benchmark sul rendimento annuo: si calcola qui, dove il
         # benchmark e' gia' stato girato, invece che dentro compute_metrics.
         rb = benchmark["metrics"].get("rendimento_medio")
@@ -733,6 +836,8 @@ def run_backtest(
     return {
         "ok": True,
         "config": cfg.to_dict(),
+        "cadenza": cadenza,
+        "periodi_anno": ppa,
         "mercato": {
             "prezzi": m[["Open", "Close", "rendimento_mese", "segnale_btd"]],
             "vol": market["vol"],
