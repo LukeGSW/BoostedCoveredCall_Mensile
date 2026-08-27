@@ -50,6 +50,13 @@ Contabilita': due grandezze diverse, da non confondere.
     Questo SI azzera a ogni gennaio, insieme a tutto il resto.
 I rendimenti sono time-weighted, quindi ripuliti dai flussi.
 
+VALORIZZAZIONE. Il motore decide e opera sulla griglia del periodo, ma il conto
+viene poi rivalutato GIORNO PER GIORNO da `giornaliero.py`, che ricostruisce la
+posizione dentro il periodo e segna a mercato anche la call venduta. Serve
+perche' un crollo rientrato prima della chiusura della barra non lascerebbe
+traccia nella serie di periodo, e il drawdown misurato risulterebbe molto piu'
+tenero di quello vero. Le due serie coincidono al centesimo a ogni fine periodo.
+
 Nomi delle colonne: restano quelli storici (`rendimento_mese`, `twr_mese`,
 `versamento_mese`) anche in cadenza settimanale, dove vanno letti come "del
 periodo". Cambiarli avrebbe rotto export, grafici e file gia' salvati senza
@@ -64,6 +71,7 @@ import numpy as np
 import pandas as pd
 
 from .cadenza import CADENZE, PERIODI_ANNO
+from .giornaliero import metriche_giornaliere, valorizza_giornaliero
 from .cadenza import normalizza as CADENZA_VALIDA
 from .cadenza import periodi_anno
 from .pricing import PremiumModel, bs_call_price, strike_for_delta
@@ -798,6 +806,27 @@ def run_backtest(
     benchmark = run_variant(market, cfg, BENCHMARK)
     bm = benchmark["monthly"]
 
+    # Rivalutazione giornaliera: non cambia una virgola di come si opera, cambia
+    # solo con che frequenza si guarda il conto. Senza dati giornalieri si resta
+    # alla valorizzazione di fine periodo, dicendolo.
+    pm = cfg.premium_model
+    giornalieri_disponibili = (isinstance(daily, pd.DataFrame) and not daily.empty)
+    if not giornalieri_disponibili:
+        market["warnings"].append(
+            "Dati giornalieri non disponibili: il conto e' valorizzato solo alla chiusura "
+            "di ogni periodo, quindi i drawdown rientrati prima della chiusura non compaiono."
+        )
+
+    def _giornaliera(res: Dict[str, Any]) -> None:
+        """Aggiunge a una variante la serie giornaliera e le sue metriche di rischio."""
+        if not giornalieri_disponibili or res["monthly"].empty:
+            res["daily"] = pd.DataFrame()
+            return
+        res["daily"] = valorizza_giornaliero(res["monthly"], daily, cfg, pm.r, pm.q)
+        if res.get("metrics") is not None and not res["daily"].empty:
+            res["metrics"].update(metriche_giornaliere(
+                res["daily"], res["monthly"], cfg.var_confidence))
+
     risultati: Dict[str, Any] = {}
     for name in VARIANTS:
         res = run_variant(market, cfg, name)
@@ -809,10 +838,12 @@ def run_backtest(
             res["monthly"]["ciclo_annuale_dd"] = bm["dd_twr_pct"].reindex(idx)
         if not res["monthly"].empty:
             res["metrics"] = compute_metrics(res["monthly"], cfg.var_confidence, ppa)
+        _giornaliera(res)
         risultati[name] = res
 
     if not bm.empty:
         benchmark["metrics"] = compute_metrics(bm, cfg.var_confidence, ppa)
+        _giornaliera(benchmark)
         # Confronto col benchmark sul rendimento annuo: si calcola qui, dove il
         # benchmark e' gia' stato girato, invece che dentro compute_metrics.
         rb = benchmark["metrics"].get("rendimento_medio")
@@ -820,12 +851,31 @@ def run_backtest(
             mt = res.get("metrics")
             if not mt:
                 continue
+            suo_dd = benchmark["metrics"].get("max_dd_giornaliero_pct")
+            mio_dd = mt.get("max_dd_giornaliero_pct")
+            mt["ciclo_max_dd_giornaliero_pct"] = suo_dd
+            # La riduzione del drawdown va misurata sul drawdown VERO: farla
+            # sulle chiusure di periodo confronterebbe due numeri entrambi
+            # sottostimati, e non nello stesso modo.
+            if mio_dd is not None and suo_dd:
+                mt["riduzione_dd_giornaliera_vs_ciclo"] = 1.0 - abs(mio_dd) / abs(suo_dd)
             mt["ciclo_rendimento_medio"] = rb
             mt["ciclo_rendimento_volatilita"] = benchmark["metrics"].get("rendimento_volatilita")
             mt["ciclo_rendimento_su_rischio"] = benchmark["metrics"].get("rendimento_su_rischio")
             mio = mt.get("rendimento_medio")
             mt["extra_rendimento_vs_ciclo"] = (
                 mio - rb if (mio is not None and rb is not None) else None)
+
+    scarti = [r["metrics"].get("riconciliazione_scarto") for r in risultati.values()
+              if r.get("metrics")]
+    scarti = [x for x in scarti if x is not None]
+    if scarti and max(scarti) > 1e-3:
+        market["warnings"].append(
+            f"La serie giornaliera e quella di periodo non coincidono a fine periodo "
+            f"(scarto massimo {max(scarti):.2%} del conto): probabilmente i due download "
+            f"hanno aggiustamenti diversi per dividendi o split. I drawdown giornalieri "
+            f"restano indicativi."
+        )
 
     # Buy & Hold semplice: solo il capitale iniziale, mai piu' toccato
     capitale_annuo = cfg.capitale_iniziale + cfg.capitale_addizionale
