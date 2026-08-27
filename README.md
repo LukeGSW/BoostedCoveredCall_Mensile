@@ -89,6 +89,30 @@ e la dashboard modella questa pendenza:
 
     vrp(sigma) = vrp_a_20% + pendenza x ln(sigma / 20%)
 
+### Cosa si tocca nella sidebar
+
+Due sole scelte, entrambe con un default che va bene cosi' com'e'.
+
+**Taratura del premio.** *Predefinito* usa i coefficienti misurati sui prezzi reali ed e'
+il punto di partenza giusto per un sottostante qualunque. *Calibrato sui prezzi reali*
+compare da solo dopo aver caricato un file nella scheda Calibrazione premio, e prende i
+valori da li' senza doverli ricopiare. *Manuale* apre i due parametri del modello, il
+livello del rapporto fra volatilita' implicita e realizzata e la sua pendenza. Sotto la
+scelta c'e' sempre la traduzione in premi concreti: quanto incasserebbe una call mensile su
+un indice, su un titolo e su una crypto.
+
+**Memoria del modello**, cioe' quanto storico guarda lo stimatore di volatilita':
+
+| | Guarda | Si accorge di un cambio di regime in | Il premio si muove |
+|---|---|---|---|
+| **Predefinita** | 6 mesi, smorzati verso 2 anni | 4 mesi | 2,7% al mese |
+| Piu reattiva | 3 mesi, smorzati poco | **1 mese** | 3,6% al mese, salti fino all'80% |
+| Piu stabile | 1 anno, appoggiato a 3 anni | 7 mesi | **2,3% al mese**, mai oltre il 18% |
+
+Il premio medio esce quasi identico in tutti e tre i casi: cambia solo quanto in fretta
+segue il mercato e quanto balla nel frattempo. *Manuale* espone stimatore, finestre e peso
+uno per uno.
+
 ### Quanto e' affidabile su un ticker che non hai calibrato
 
 Validazione leave-one-out sui sei sottostanti: il coefficiente viene stimato su cinque e
