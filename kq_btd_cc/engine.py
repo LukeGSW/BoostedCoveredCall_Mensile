@@ -26,9 +26,15 @@ Modello (una riga = un mese di calendario):
     L'eventuale eccedenza resta come cassa non impiegata; se manca capitale,
     si versa la differenza (ed e' un versamento, non un utile).
 
-Contabilita': ogni euro che entra dall'esterno e' tracciato in
-`versamenti_cum`, cosi' `pnl_netto = valore_portafoglio - versamenti_cum` e'
-il vero risultato della strategia, e i rendimenti sono time-weighted.
+Contabilita': due grandezze diverse, da non confondere.
+  * `versamenti_cum` e' il denaro entrato dall'esterno dall'inizio del backtest.
+    NON si azzera a gennaio, perche' e' il metro con cui si misura l'utile:
+    `pnl_netto = valore_portafoglio - versamenti_cum`. Azzerarlo farebbe
+    ricomparire ogni anno come "guadagno" del denaro che invece hai versato tu.
+  * `capitale_impiegato_anno` e' quanto la strategia sta facendo lavorare nel
+    ciclo in corso: capitale fisso piu' i Buy-The-Dip accumulati nell'anno.
+    Questo SI azzera a ogni gennaio, insieme a tutto il resto.
+I rendimenti sono time-weighted, quindi ripuliti dai flussi.
 """
 from __future__ import annotations
 
@@ -333,6 +339,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
             "btd_importo": btd_importo,
             "btd_quota_calo": quota_calo, "btd_quota_boost": quota_boost,
             "btd_residuo_anno": max(0.0, tetto_btd - btd_usato_anno),
+            "capitale_impiegato_anno": capitale_annuo + btd_usato_anno,
             "btd_prezzo": prezzo_btd if btd_importo > 0 else np.nan,
             "sigma_stimata": float(sigma) if np.isfinite(sigma) else np.nan,
             "sigma_implicita": float(pm.implied_sigma(sigma)) if np.isfinite(sigma) else np.nan,
