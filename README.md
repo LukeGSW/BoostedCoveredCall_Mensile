@@ -96,6 +96,35 @@ piu' profondo rimasto scoperto, e compare un avviso.
 volatilita', Sharpe, drawdown e VaR sono calcolati sul **rendimento time-weighted**, che
 neutralizza i flussi di cassa.
 
+### Il vero freno: meta' del conto sta ferma
+
+Il reset annuale reimpiega solo il capitale fisso e lascia in cassa tutti i profitti
+accumulati. Dopo qualche anno la cassa diventa la parte piu' grossa del conto: su S&P 500
+dal 2000, con 100.000 di capitale fisso, a fine periodo il **62,5%** del conto e' liquidita'
+e sul periodo intero la media e' del **48%**.
+
+Questo ha due conseguenze che vanno tenute a mente leggendo i risultati.
+
+**Il CAGR e' diluito.** Calcolato sul conto intero da' 2,51%, ma meta' di quel conto non
+lavora. Sul capitale effettivamente impiegato il rendimento e' **3,90% all'anno**. La
+dashboard riporta entrambi: *CAGR* e *Rendimento annuo sul capitale impiegato*, con accanto
+*Quota media del conto investita*.
+
+**La remunerazione della cassa conta piu' di quanto sembri.** Il default e' 0%, cioe' liquidita'
+ferma sul conto che non rende nulla per ventisei anni. Con un tasso realistico il quadro
+cambia in modo sostanziale:
+
+| Cassa remunerata al | Valore finale | Utile netto | CAGR | Sharpe |
+|---|---|---|---|---|
+| 0% (default) | 518.546 | 267.625 | 2,51% | 0,34 |
+| 2% | 628.771 | 380.044 | 3,31% | 0,46 |
+| 4% | 789.357 | **542.868** | **4,24%** | 0,62 |
+
+Passando da 0% a 4% l'utile piu' che raddoppia. E' lo stesso motivo per cui il buy and hold
+che non liquida mai sembra irraggiungibile: quello tiene il 100% investito e capitalizza
+senza interruzioni, la strategia ne tiene circa la meta'. La dashboard avvisa quando la quota
+investita scende sotto l'80%.
+
 **Saldo a debito.** Se il riacquisto di una call molto in-the-money supera la liquidita'
 disponibile, il conto va a debito contro le azioni in portafoglio. Il finanziamento e'
 tracciato, gli si applica un tasso configurabile, e la dashboard avvisa quando diventa
