@@ -29,7 +29,8 @@ DIZIONARIO_CAMPI: Dict[str, str] = {
     "btd_importo": "Capitale investito nel Buy-The-Dip in questo mese, boost incluso",
     "btd_quota_calo": "Parte dell'acquisto legata all'entita' del calo del mese precedente",
     "btd_quota_boost": "Parte dell'acquisto dovuta al boost pianificato a inizio anno",
-    "btd_residuo_anno": "Capitale ancora disponibile sotto il tetto annuo dei BTD",
+    "btd_residuo_anno": "Capitale ancora disponibile sotto il tetto annuo dei BTD; "
+                        "vuoto quando non e' impostato alcun tetto (default)",
     "capitale_impiegato_anno": "Capitale messo al lavoro nel ciclo annuale in corso: "
                                "capitale fisso piu' i Buy-The-Dip dell'anno. Si azzera "
                                "a ogni gennaio, a differenza di versamenti_cum",
