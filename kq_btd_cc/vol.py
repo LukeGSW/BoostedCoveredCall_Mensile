@@ -145,16 +145,26 @@ def sigma_at(vol_series: pd.Series, when: pd.Timestamp, fallback: float = np.nan
     return v if np.isfinite(v) and v > 0 else fallback
 
 
-def vol_from_monthly(monthly: pd.DataFrame, window: int = 12) -> pd.Series:
-    """Fallback: vol annualizzata stimata dai soli rendimenti mensili.
+def vol_from_periods(barre: pd.DataFrame, periodi_anno: float = 12.0,
+                     window: Optional[int] = None) -> pd.Series:
+    """Fallback: vol annualizzata stimata dai soli rendimenti del periodo.
 
-    Usato quando i dati giornalieri non sono disponibili per il ticker.
+    Usato quando i dati giornalieri non sono disponibili per il ticker. La
+    finestra di default e' un anno di barre, quindi dodici sulla cadenza
+    mensile e cinquantadue su quella settimanale, e l'annualizzazione segue lo
+    stesso numero di periodi.
     """
-    if monthly is None or monthly.empty or "Close" not in monthly.columns:
+    if barre is None or barre.empty or "Close" not in barre.columns:
         return pd.Series(dtype=float)
-    r = np.log((monthly["Close"] / monthly["Close"].shift(1)).where(lambda x: x > 0))
-    return (r.rolling(window, min_periods=max(3, window // 2)).std(ddof=1)
-            * np.sqrt(12.0)).rename("realized_vol")
+    n = int(window or max(3, round(float(periodi_anno))))
+    r = np.log((barre["Close"] / barre["Close"].shift(1)).where(lambda x: x > 0))
+    return (r.rolling(n, min_periods=max(3, n // 2)).std(ddof=1)
+            * np.sqrt(float(periodi_anno))).rename("realized_vol")
+
+
+def vol_from_monthly(monthly: pd.DataFrame, window: int = 12) -> pd.Series:
+    """Compatibilita': `vol_from_periods` sulla cadenza mensile."""
+    return vol_from_periods(monthly, periodi_anno=12.0, window=window)
 
 
 def vol_summary(vol_series: pd.Series) -> Dict[str, Optional[float]]:
