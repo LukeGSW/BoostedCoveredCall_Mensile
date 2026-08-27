@@ -13,7 +13,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from .style import PALETTE, COLORE_VARIANTE, SCALA_DIVERGENTE, TEMPLATE_NAME, FONT_MONO
+from .style import (PALETTE, COLORE_BENCHMARK, COLORE_VARIANTE, SCALA_DIVERGENTE,
+                    TEMPLATE_NAME, FONT_MONO)
 from .metrics import drawdown_durations
 
 MESI_IT = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
@@ -96,6 +97,51 @@ def _bande_anni(fig: go.Figure, index: pd.DatetimeIndex, riga: Optional[int] = N
             fig.add_vrect(**kw, row=riga, col=1)
 
 
+def _fuori_scala(serie: pd.Series, riferimento: float, fattore: float = 8.0) -> bool:
+    """La serie schiaccerebbe tutte le altre se disegnata sullo stesso asse?
+
+    Succede sui sottostanti che si moltiplicano per ordini di grandezza: un buy
+    and hold che non liquida mai arriva a valori tali da rendere piatte tutte le
+    altre curve. Meglio toglierlo e dirlo, che disegnare un grafico illeggibile.
+    """
+    if serie is None or serie.empty or not np.isfinite(riferimento) or riferimento <= 0:
+        return False
+    picco = float(np.nanmax(np.abs(serie.values)))
+    return np.isfinite(picco) and picco > fattore * abs(riferimento)
+
+
+def _nota_fuori_scala(fig: go.Figure, testo: str) -> None:
+    fig.add_annotation(
+        text=testo, xref="paper", yref="paper", x=0.0, y=1.0, xanchor="left", yanchor="top",
+        showarrow=False, align="left",
+        font=dict(color=PALETTE["bh_flussi"], size=11),
+        bgcolor="rgba(17,24,39,0.85)", borderpad=6)
+
+
+def _benchmark(risultato: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Il termine di paragone a parita' di mandato, se disponibile."""
+    b = risultato.get("benchmark")
+    if not b or not isinstance(b.get("monthly"), pd.DataFrame) or b["monthly"].empty:
+        return None
+    return b
+
+
+def _traccia_benchmark(fig: go.Figure, x, y, nome: str = "", spesso: bool = False,
+                       riempi: bool = False, riga: Optional[int] = None) -> None:
+    """Linea del benchmark, sempre tratteggiata e dello stesso colore ovunque."""
+    kw: Dict[str, Any] = dict(
+        x=x, y=y, name=nome or "Buy & Hold (stesso ciclo annuale)",
+        line=dict(color=COLORE_BENCHMARK, width=2.4 if spesso else 2.0, dash="dash"))
+    if riempi:
+        kw["fill"] = "tozeroy"
+        kw["fillcolor"] = _rgba(COLORE_BENCHMARK, 0.12)
+    traccia = go.Scatter(**kw)
+    if riga is None:
+        fig.add_trace(traccia)
+    else:
+        fig.add_trace(traccia, row=riga, col=1)
+
+
 def _serie_varianti(risultato: Dict[str, Any], colonna: str) -> Dict[str, pd.Series]:
     out: Dict[str, pd.Series] = {}
     for chiave, res in risultato.get("varianti", {}).items():
@@ -117,22 +163,35 @@ def fig_confronto_equity(risultato: Dict[str, Any], log: bool = False,
 
     fig = go.Figure()
     rif = next(iter(varianti.values()))["monthly"]
+    scala = max(float(np.nanmax(res["monthly"]["valore_portafoglio"].values))
+                for res in varianti.values() if not res["monthly"].empty)
+    fuori = []
 
-    # Buy & Hold semplice: solo il capitale iniziale, mai piu' toccato
-    bh = risultato.get("mercato", {}).get("bh_semplice")
-    if isinstance(bh, pd.Series) and not bh.empty:
-        fig.add_trace(go.Scatter(
-            x=bh.index, y=bh.values, name="Buy & Hold (solo capitale iniziale)",
-            line=dict(color=PALETTE["bh_semplice"], width=1.8, dash="dash"),
-            hovertemplate=HT_VAL))
+    # Il benchmark a parita' di mandato, sempre presente
+    bm = _benchmark(risultato)
+    if bm is not None:
+        s = bm["monthly"]["valore_portafoglio"]
+        _traccia_benchmark(fig, s.index, s.values, bm["label"], spesso=True)
+        fig.data[-1].update(hovertemplate=HT_VAL)
+        scala = max(scala, float(np.nanmax(s.values)))
 
-    # Buy & Hold che riceve gli stessi versamenti della strategia
-    if "bh_stessi_flussi" in rif.columns:
-        s = rif["bh_stessi_flussi"]
-        fig.add_trace(go.Scatter(
-            x=s.index, y=s.values, name="Buy & Hold (stessi versamenti)",
-            line=dict(color=PALETTE["bh_flussi"], width=1.8, dash="dot"),
-            hovertemplate=HT_VAL))
+    # I due buy and hold che non liquidano mai: su un sottostante che si
+    # moltiplica per ordini di grandezza escono dal grafico. In scala
+    # logaritmica ci stanno, altrimenti li si segnala e basta.
+    for serie, nome, colore, tratto in (
+        (risultato.get("mercato", {}).get("bh_semplice"),
+         "Buy & Hold (solo capitale iniziale)", PALETTE["bh_semplice"], "dash"),
+        (rif["bh_stessi_flussi"] if "bh_stessi_flussi" in rif.columns else None,
+         "Buy & Hold (stessi versamenti)", PALETTE["bh_flussi"], "dot"),
+    ):
+        if not isinstance(serie, pd.Series) or serie.empty:
+            continue
+        if log or not _fuori_scala(serie, scala):
+            fig.add_trace(go.Scatter(
+                x=serie.index, y=serie.values, name=nome,
+                line=dict(color=colore, width=1.8, dash=tratto), hovertemplate=HT_VAL))
+        else:
+            fuori.append(f"{nome}: {serie.iloc[-1]:,.0f} $")
 
     for chiave, res in varianti.items():
         df = res["monthly"]
@@ -157,11 +216,17 @@ def fig_confronto_equity(risultato: Dict[str, Any], log: bool = False,
     fig.update_yaxes(tickprefix="$", type="log" if log else "linear",
                      title_text="Valore del conto")
     _asse_tempo(fig)
-    return _layout(
+    fig = _layout(
         fig, "Confronto delle equity",
         "Valore totale del conto (quote a mercato piu' cassa). La banda grigia e' il "
         "denaro effettivamente versato: quanto la curva le sta sopra e' utile vero.",
         altezza=520)
+    if fuori:
+        _nota_fuori_scala(
+            fig, "Fuori scala, non disegnati: " + " · ".join(fuori)
+                 + ".<br>Non liquidano mai, mentre la strategia chiude ogni dodici mesi. "
+                   "Attiva la scala logaritmica nella sidebar per vederli.")
+    return fig
 
 
 # ============================================================================
@@ -174,12 +239,30 @@ def fig_pnl_netto(risultato: Dict[str, Any]) -> go.Figure:
 
     fig = go.Figure()
     rif = next(iter(risultato["varianti"].values()))["monthly"]
+    scala = max(float(np.nanmax(np.abs(s.values))) for s in serie.values())
+
+    # Il confronto a parita' di mandato, sempre sulla stessa scala della strategia
+    bm = _benchmark(risultato)
+    if bm is not None:
+        s = bm["monthly"]["pnl_netto"]
+        _traccia_benchmark(fig, s.index, s.values, bm["label"], spesso=True)
+        fig.data[-1].update(hovertemplate=HT_VAL)
+        scala = max(scala, float(np.nanmax(np.abs(s.values))))
+
+    nota_extra = ""
     if "bh_stessi_flussi" in rif.columns:
         s = rif["bh_stessi_flussi"] - rif["versamenti_cum"]
-        fig.add_trace(go.Scatter(
-            x=s.index, y=s.values, name="Buy & Hold (stessi versamenti)",
-            line=dict(color=PALETTE["bh_flussi"], width=1.8, dash="dot"),
-            hovertemplate=HT_VAL))
+        if _fuori_scala(s, scala):
+            nota_extra = (f"Buy &amp; Hold che non liquida mai: {s.iloc[-1]:,.0f} $, "
+                          f"fuori scala di {abs(s.iloc[-1]) / max(scala, 1):,.0f} volte. "
+                          f"Tiene per sempre le quote comprate all'inizio, mentre la "
+                          f"strategia liquida ogni dodici mesi: non e' un confronto "
+                          f"a parita di mandato.")
+        else:
+            fig.add_trace(go.Scatter(
+                x=s.index, y=s.values, name="Buy & Hold (stessi versamenti)",
+                line=dict(color=PALETTE["bh_flussi"], width=1.8, dash="dot"),
+                hovertemplate=HT_VAL))
 
     for chiave, s in serie.items():
         label = risultato["varianti"][chiave]["label"]
@@ -193,11 +276,14 @@ def fig_pnl_netto(risultato: Dict[str, Any]) -> go.Figure:
     _bande_anni(fig, rif.index)
     fig.update_yaxes(tickprefix="$", title_text="Utile netto")
     _asse_tempo(fig)
-    return _layout(
+    fig = _layout(
         fig, "Utile netto dei versamenti",
         "Valore del conto meno tutto il denaro versato dall'esterno, BTD compresi. "
         "Sotto lo zero la strategia sta perdendo, per quanto il conto sia cresciuto.",
         altezza=460)
+    if nota_extra:
+        _nota_fuori_scala(fig, nota_extra)
+    return fig
 
 
 # ============================================================================
@@ -219,11 +305,21 @@ def fig_equity_drawdown(risultato: Dict[str, Any], chiave: str) -> go.Figure:
         line=dict(color=PALETTE["versamenti"], width=1.3, dash="longdash"),
         fill="tozeroy", fillcolor="rgba(100,116,139,0.12)",
         hovertemplate=HT_VAL), row=1, col=1)
+    bm = _benchmark(risultato)
+    if bm is not None:
+        sb = bm["monthly"]["valore_portafoglio"]
+        _traccia_benchmark(fig, sb.index, sb.values, bm["label"], riga=1)
+        fig.data[-1].update(hovertemplate=HT_VAL)
     fig.add_trace(go.Scatter(
         x=df.index, y=df["valore_portafoglio"], name=res["label"],
         line=dict(color=colore, width=2.6), hovertemplate=HT_VAL), row=1, col=1)
 
     dd = df["dd_valore"]
+    if bm is not None:
+        sb = bm["monthly"]["dd_valore"]
+        _traccia_benchmark(fig, sb.index, sb.values,
+                           f"Drawdown del {bm['label']}", riga=2)
+        fig.data[-1].update(hovertemplate=HT_VAL)
     fig.add_trace(go.Scatter(
         x=dd.index, y=dd.values, name="Drawdown del conto",
         line=dict(color=PALETTE["drawdown"], width=1.4),
@@ -256,6 +352,11 @@ def fig_underwater(risultato: Dict[str, Any]) -> go.Figure:
         return _vuoto("Nessun dato disponibile")
     fig = go.Figure()
     rif = next(iter(risultato["varianti"].values()))["monthly"]
+    bm = _benchmark(risultato)
+    if bm is not None:
+        s = bm["monthly"]["dd_twr_pct"]
+        _traccia_benchmark(fig, s.index, s.values, bm["label"], riempi=True)
+        fig.data[-1].update(hovertemplate=HT_PCT)
     if "bh_dd_twr_pct" in rif.columns:
         s = rif["bh_dd_twr_pct"]
         fig.add_trace(go.Scatter(
@@ -285,12 +386,22 @@ def fig_underwater(risultato: Dict[str, Any]) -> go.Figure:
 # ============================================================================
 def fig_verdetto_vs_bh(risultato: Dict[str, Any]) -> go.Figure:
     """Le due domande che contano: quanto drawdown in meno, quanto rendimento in piu'."""
+    # Se il ciclo annuale e' disponibile e' quello il metro giusto: stesso
+    # mandato, stessa liquidazione a dicembre, unica differenza le opzioni e i BTD.
+    prima = next(iter(risultato.get("varianti", {}).values()), {}).get("metrics") or {}
+    usa_ciclo = prima.get("ciclo_cagr") is not None
+    k_dd = "riduzione_dd_vs_ciclo" if usa_ciclo else "riduzione_dd_vs_bh"
+    k_cagr = "extra_cagr_vs_ciclo" if usa_ciclo else "extra_cagr_vs_bh"
+    k_mio_dd, k_suo_dd = "max_dd_pct", ("ciclo_max_dd_pct" if usa_ciclo else "bh_max_dd_pct")
+    k_mio_c, k_suo_c = "cagr", ("ciclo_cagr" if usa_ciclo else "bh_cagr")
+    metro = "solo sottostante, stesso ciclo annuale" if usa_ciclo else "Buy & Hold"
+
     righe = []
     for chiave, res in risultato.get("varianti", {}).items():
         mt = res.get("metrics") or {}
-        if mt.get("riduzione_dd_vs_bh") is None and mt.get("extra_cagr_vs_bh") is None:
+        if mt.get(k_dd) is None and mt.get(k_cagr) is None:
             continue
-        righe.append((res["label"], mt.get("riduzione_dd_vs_bh"), mt.get("extra_cagr_vs_bh"),
+        righe.append((res["label"], mt.get(k_dd), mt.get(k_cagr),
                       COLORE_VARIANTE.get(chiave, PALETTE["text"]), mt))
     if not righe:
         return _vuoto("Metriche non disponibili")
@@ -298,16 +409,16 @@ def fig_verdetto_vs_bh(risultato: Dict[str, Any]) -> go.Figure:
     etichette = [r[0] for r in righe]
     colori = [r[3] for r in righe]
     fig = make_subplots(rows=1, cols=2, horizontal_spacing=0.14,
-                        subplot_titles=("Drawdown in meno del Buy & Hold",
-                                        "CAGR in piu del Buy & Hold"))
+                        subplot_titles=(f"Drawdown in meno del {metro}",
+                                        f"CAGR in piu del {metro}"))
 
     fig.add_trace(go.Bar(
         y=etichette, x=[r[1] for r in righe], orientation="h", showlegend=False,
         marker=dict(color=colori, line=dict(width=0)),
         text=[f"{r[1]:+.1%}" if r[1] is not None else "n.d." for r in righe],
         textposition="outside", textfont=dict(family=FONT_MONO, size=12),
-        customdata=np.c_[[r[4].get("max_dd_pct") or np.nan for r in righe],
-                         [r[4].get("bh_max_dd_pct") or np.nan for r in righe]],
+        customdata=np.c_[[r[4].get(k_mio_dd) or np.nan for r in righe],
+                         [r[4].get(k_suo_dd) or np.nan for r in righe]],
         hovertemplate=("strategia %{customdata[0]:.1%} contro B&H %{customdata[1]:.1%}"
                        "<extra></extra>")), row=1, col=1)
 
@@ -316,8 +427,8 @@ def fig_verdetto_vs_bh(risultato: Dict[str, Any]) -> go.Figure:
         marker=dict(color=colori, line=dict(width=0)),
         text=[f"{r[2]:+.1%}" if r[2] is not None else "n.d." for r in righe],
         textposition="outside", textfont=dict(family=FONT_MONO, size=12),
-        customdata=np.c_[[r[4].get("cagr") or np.nan for r in righe],
-                         [r[4].get("bh_cagr") or np.nan for r in righe]],
+        customdata=np.c_[[r[4].get(k_mio_c) or np.nan for r in righe],
+                         [r[4].get(k_suo_c) or np.nan for r in righe]],
         hovertemplate=("strategia %{customdata[0]:.1%} contro B&H %{customdata[1]:.1%}"
                        "<extra></extra>")), row=1, col=2)
 
@@ -326,7 +437,11 @@ def fig_verdetto_vs_bh(risultato: Dict[str, Any]) -> go.Figure:
         fig.update_xaxes(tickformat="+.0%", showgrid=True, zeroline=False, row=1, col=col)
         fig.update_yaxes(showgrid=False, autorange="reversed", row=1, col=col)
     fig.update_layout(hovermode="closest", bargap=0.42)
-    return _layout(fig, "Verdetto contro il Buy & Hold",
+    return _layout(fig, f"Verdetto contro il {metro}",
+                   "Il metro e' il solo sottostante comprato e liquidato con lo stesso ciclo "
+                   "annuale della strategia: cambia solo la presenza delle opzioni e dei "
+                   "Buy-The-Dip. A sinistra il valore positivo significa meno drawdown; a "
+                   "destra piu rendimento." if usa_ciclo else
                    "Confronto a parita di versamenti. A sinistra il valore positivo significa "
                    "meno drawdown della strategia; a destra significa piu rendimento.",
                    altezza=340, legenda=False)
@@ -419,7 +534,11 @@ def fig_rendimenti_annuali(risultato: Dict[str, Any]) -> go.Figure:
 
     fig = go.Figure()
     rif_y = None
-    for chiave, res in varianti.items():
+    tutte = dict(varianti)
+    bm = _benchmark(risultato)
+    if bm is not None:
+        tutte["benchmark"] = bm
+    for chiave, res in tutte.items():
         y = res.get("yearly")
         if y is None or y.empty:
             continue
@@ -427,14 +546,16 @@ def fig_rendimenti_annuali(risultato: Dict[str, Any]) -> go.Figure:
         fig.add_trace(go.Bar(
             x=y.index.astype(str), y=y["twr_anno"], name=res["label"],
             marker=dict(color=COLORE_VARIANTE.get(chiave, PALETTE["text"]),
-                        line=dict(width=0)),
+                        line=dict(width=2 if chiave == "benchmark" else 0,
+                                  color=COLORE_BENCHMARK)),
+            opacity=0.55 if chiave == "benchmark" else 1.0,
             hovertemplate="%{fullData.name} %{x}: <b>%{y:.1%}</b><extra></extra>"))
 
     if rif_y is not None and "rendimento_sottostante" in rif_y.columns:
         fig.add_trace(go.Scatter(
             x=rif_y.index.astype(str), y=rif_y["rendimento_sottostante"],
-            name="Sottostante", mode="markers",
-            marker=dict(color=PALETTE["prezzo"], size=11, symbol="diamond",
+            name="Sottostante (senza ciclo)", mode="markers",
+            marker=dict(color=PALETTE["prezzo"], size=10, symbol="diamond",
                         line=dict(color=PALETTE["bg"], width=1.5)),
             hovertemplate="Sottostante %{x}: <b>%{y:.1%}</b><extra></extra>"))
 
@@ -492,7 +613,16 @@ def fig_distribuzione(risultato: Dict[str, Any]) -> go.Figure:
     prezzi = risultato.get("mercato", {}).get("prezzi")
 
     fig = go.Figure()
-    if isinstance(prezzi, pd.DataFrame) and "rendimento_mese" in prezzi.columns:
+    bm = _benchmark(risultato)
+    if bm is not None:
+        rb = bm["monthly"]["twr_mese"].dropna()
+        if not rb.empty:
+            fig.add_trace(go.Violin(
+                y=rb.values, name=bm["label"], box_visible=True, meanline_visible=True,
+                line=dict(color=COLORE_BENCHMARK, width=1.6),
+                fillcolor=_rgba(COLORE_BENCHMARK, 0.22), opacity=0.9, points=False,
+                hovertemplate=f"{bm['label']}<br>%{{y:.2%}}<extra></extra>"))
+    elif isinstance(prezzi, pd.DataFrame) and "rendimento_mese" in prezzi.columns:
         r = prezzi["rendimento_mese"].dropna()
         if not r.empty:
             fig.add_trace(go.Violin(
@@ -550,11 +680,16 @@ def fig_rolling(risultato: Dict[str, Any], finestra: int = 12) -> go.Figure:
 # ============================================================================
 def fig_rischio_rendimento(risultato: Dict[str, Any]) -> go.Figure:
     punti = []
-    for chiave, res in risultato.get("varianti", {}).items():
+    tutte = dict(risultato.get("varianti", {}))
+    bm = _benchmark(risultato)
+    if bm is not None:
+        tutte["benchmark"] = bm
+    for chiave, res in tutte.items():
         mt = res.get("metrics") or {}
         if mt.get("cagr") is not None and mt.get("volatilita_annua"):
             punti.append((res["label"], mt["volatilita_annua"], mt["cagr"],
-                          mt.get("sharpe"), COLORE_VARIANTE.get(chiave, PALETTE["text"])))
+                          mt.get("sharpe"), COLORE_VARIANTE.get(chiave, PALETTE["text"]),
+                          chiave == "benchmark"))
     if not punti:
         return _vuoto("Metriche non disponibili")
 
@@ -570,12 +705,14 @@ def fig_rischio_rendimento(risultato: Dict[str, Any]) -> go.Figure:
                            showarrow=False, xanchor="right",
                            font=dict(color=PALETTE["text_muted"], size=10))
 
-    for nome, vol, cagr, sharpe, colore in punti:
+    for nome, vol, cagr, sharpe, colore, e_bench in punti:
         fig.add_trace(go.Scatter(
             x=[vol], y=[cagr], name=nome, mode="markers+text",
             text=[nome], textposition="top center",
             textfont=dict(color=PALETTE["text_muted"], size=11),
-            marker=dict(color=colore, size=18, line=dict(color=PALETTE["bg"], width=2)),
+            marker=dict(color=colore, size=20 if e_bench else 18,
+                        symbol="diamond" if e_bench else "circle",
+                        line=dict(color=PALETTE["bg"], width=2)),
             hovertemplate=(f"<b>{nome}</b><br>Volatilita: %{{x:.1%}}<br>"
                            f"CAGR: %{{y:.1%}}<br>Sharpe: {sharpe:.2f}<extra></extra>")))
 
@@ -584,8 +721,10 @@ def fig_rischio_rendimento(risultato: Dict[str, Any]) -> go.Figure:
                      range=[0, xmax])
     fig.update_yaxes(tickformat=".0%", title_text="CAGR")
     fig.update_layout(hovermode="closest")
-    return _layout(fig, "Rischio e rendimento", "Entrambi annualizzati e time-weighted.",
-                   altezza=440, legenda=False)
+    return _layout(fig, "Rischio e rendimento",
+                   "Entrambi annualizzati e time-weighted. Il rombo e' il solo sottostante "
+                   "con lo stesso ciclo annuale: le varianti sopra e a sinistra di quel "
+                   "punto stanno facendo meglio.", altezza=440, legenda=False)
 
 
 # ============================================================================
@@ -594,7 +733,11 @@ def fig_rischio_rendimento(risultato: Dict[str, Any]) -> go.Figure:
 def fig_durata_drawdown(risultato: Dict[str, Any]) -> go.Figure:
     fig = go.Figure()
     trovato = False
-    for chiave, res in risultato.get("varianti", {}).items():
+    tutte = dict(risultato.get("varianti", {}))
+    bm = _benchmark(risultato)
+    if bm is not None:
+        tutte["benchmark"] = bm
+    for chiave, res in tutte.items():
         df = res.get("monthly")
         if df is None or df.empty:
             continue
@@ -602,10 +745,12 @@ def fig_durata_drawdown(risultato: Dict[str, Any]) -> go.Figure:
         if not durate:
             continue
         trovato = True
+        e_bench = chiave == "benchmark"
         fig.add_trace(go.Histogram(
             x=durate, name=res["label"], xbins=dict(start=0.5, size=1),
             marker=dict(color=COLORE_VARIANTE.get(chiave, PALETTE["text"]),
-                        line=dict(width=0)), opacity=0.72,
+                        line=dict(width=2 if e_bench else 0, color=COLORE_BENCHMARK)),
+            opacity=0.45 if e_bench else 0.72,
             hovertemplate="%{fullData.name}<br>%{x} mesi: %{y} episodi<extra></extra>"))
     if not trovato:
         return _vuoto("Nessun episodio di drawdown registrato")
@@ -613,7 +758,8 @@ def fig_durata_drawdown(risultato: Dict[str, Any]) -> go.Figure:
     fig.update_xaxes(title_text="Durata dell'episodio (mesi)", dtick=1, showgrid=False)
     fig.update_yaxes(title_text="Numero di episodi")
     return _layout(fig, "Durata degli episodi di drawdown",
-                   "Quanto tempo passa sotto il massimo precedente.", altezza=400)
+                   "Quanto tempo passa sotto il massimo precedente, confrontato con il solo "
+                   "sottostante che segue lo stesso ciclo annuale.", altezza=400)
 
 
 # ============================================================================
