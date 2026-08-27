@@ -208,6 +208,22 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                      "iniziale, e compra sottostante che resta li' per tutto l'anno. La call "
                      "NON lo cappa: si tiene tutto il rialzo, e su di esso non si incassa "
                      "nessun premio. Viene liquidato a fine anno come il resto.")
+            modo_label = st.radio(
+                "Capitale rimesso al lavoro ogni gennaio",
+                ["Sempre lo stesso importo", "Cresce insieme al conto"], index=0,
+                help="Con l'importo fisso i profitti restano in cassa e la strategia non "
+                     "compone: guadagna ogni anno piu' o meno la stessa cifra e la curva "
+                     "cresce in linea retta e il capitale che lavora non aumenta mai. "
+                     "Con la crescita gli utili tornano al lavoro, mantenendo la proporzione "
+                     "fra parte coperta e parte scoperta, e non servono nuovi versamenti.")
+            capitale_modo = ("fisso" if modo_label.startswith("Sempre") else "composto")
+            riserva = st.slider(
+                "Riserva liquida per gli acquisti sui cali", 0, 200, 75, 5,
+                disabled=(capitale_modo == "fisso"),
+                help="In percentuale del capitale impiegato a gennaio. Quando il capitale "
+                     "cresce col conto, questa e' la parte che resta liquida per comprare "
+                     "sui cali durante l'anno: senza, ogni Buy-The-Dip richiederebbe denaro "
+                     "fresco. Se la riserva finisce, si compra meno.") / 100.0
             idle = st.slider(
                 "Remunerazione della cassa non impiegata (annua)", 0.0, 6.0, 0.0, 0.25,
                 help="Conta piu' di quanto sembri. Il reset annuale reimpiega solo il "
@@ -373,6 +389,8 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
         "end_date": data_fine.strftime("%Y-%m-%d") if fine_manuale else None,
         "capitale_iniziale": float(capitale),
         "capitale_addizionale": float(capitale_add),
+        "capitale_modo": capitale_modo,
+        "riserva_btd_pct": float(riserva),
         "boost_pct": float(boost),
         "btd_dd_weekly_limit": float(limite_dd),
         "btd_execution": "open" if esecuzione.startswith("Apertura") else "close",
@@ -455,6 +473,38 @@ def _avvisi_sottostante(risultato: Dict[str, Any], metriche: Dict[str, Any]) -> 
                 f"sottostante che corre. Se vuoi tenere piu' rialzo, abbassa il delta della "
                 f"call nella sidebar."
             )
+    ticker = str(risultato.get("config", {}).get("ticker", "")).upper()
+    if ticker.endswith(".INDX") or ticker.lstrip("$^").split(".")[0] in ("GSPC", "SPX", "NDX", "DJI"):
+        st.warning(
+            "**Stai usando un indice di prezzo**, che per costruzione esclude i dividendi: "
+            "storicamente circa due punti percentuali all'anno sull'S&P 500. La strategia "
+            "compra e tiene il sottostante, quindi nella realta' quei dividendi li "
+            "incasseresti, e il rendimento reale sarebbe piu' alto di quanto vedi qui. "
+            "Per una simulazione completa usa l'ETF corrispondente (per esempio `SPY.US`), "
+            "dove il motore lavora sui prezzi rettificati e i dividendi sono inclusi."
+        )
+
+    cfgd = risultato.get("config", {})
+    if str(cfgd.get("capitale_modo", "fisso")) == "fisso":
+        x = (risultato.get("varianti", {}).get("premi_cash", {}) or {}).get("monthly")
+        if isinstance(x, pd.DataFrame) and not x.empty and "capitale_impiegato_anno" in x:
+            gen = x.groupby("anno").head(1)
+            cap = (gen["quote_coperte"] + gen["quote_extra"]) * gen["open"]
+            crescita_cap = cap.iloc[-1] / cap.iloc[0] - 1 if cap.iloc[0] else 0
+            crescita_conto = (x["valore_portafoglio"].iloc[-1]
+                              / x["valore_portafoglio"].iloc[0] - 1)
+            if crescita_conto > 0.5 and crescita_cap < 0.25:
+                st.warning(
+                    f"**La strategia non compone.** Il capitale rimesso al lavoro a gennaio "
+                    f"e' passato da {fmt_currency_compact(cap.iloc[0])} a "
+                    f"{fmt_currency_compact(cap.iloc[-1])} ({crescita_cap:+.0%}) mentre il "
+                    f"conto e' cresciuto del {crescita_conto:+.0%}: gli utili restano in "
+                    f"cassa e ogni anno si riparte dallo stesso importo. La curva cresce in "
+                    f"linea retta invece che esponenzialmente. Nella sidebar, sotto "
+                    f"*Capitale*, scegli **Cresce insieme al "
+                    f"conto** per farli tornare al lavoro."
+                )
+
     quota = metriche.get("quota_conto_investita")
     if quota is not None and quota < 0.80:
         tasso = float(risultato.get("config", {}).get("idle_cash_rate", 0.0))
@@ -462,10 +512,9 @@ def _avvisi_sottostante(risultato: Dict[str, Any], metriche: Dict[str, Any]) -> 
             f"**Solo il {quota:.0%} del conto e' investito**, il resto e' cassa: il reset "
             f"annuale reimpiega il capitale fisso e lascia ferma tutta la liquidita' "
             f"accumulata (in media {fmt_currency_compact(metriche.get('cassa_media'))}). "
-            f"Il CAGR del {fmt_pct(metriche.get('cagr'), 2)} e' calcolato sul conto intero, "
-            f"quindi e' diluito da quella parte che non lavora: sul capitale davvero "
-            f"impiegato il rendimento e' "
-            f"**{fmt_pct(metriche.get('rendimento_capitale_impiegato'), 2)} all'anno**."
+            f"Il rendimento riportato e' quello sul capitale davvero investito "
+            f"(**{fmt_pct(metriche.get('rendimento_medio'), 2)} medio annuo**), "
+            f"non sul conto intero: la cassa ferma non entra al denominatore."
         )
         if tasso <= 0:
             msg += (" E quella cassa e' remunerata allo 0%: se la parcheggi in un monetario, "
@@ -495,28 +544,30 @@ def scheda_sintesi(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
         ("Utile netto — Reinvest", fmt_currency_compact(reinvest.get("pnl_netto")),
          f"su {fmt_currency_compact(reinvest.get('versamenti_totali'))} versati",
          segno_di(reinvest.get("pnl_netto"))),
-        ("CAGR — Reinvest", fmt_pct(reinvest.get("cagr")),
-         f"Buy & Hold {fmt_pct(reinvest.get('bh_cagr'))}",
-         segno_di(reinvest.get("extra_cagr_vs_bh"))),
+        ("Rendimento medio — Reinvest", fmt_pct(reinvest.get("rendimento_medio")),
+         f"Buy & Hold {fmt_pct(reinvest.get('ciclo_rendimento_medio'))}",
+         segno_di(reinvest.get("extra_rendimento_vs_ciclo"))),
         ("Max drawdown — Cash", fmt_pct(cash.get("max_dd_pct")),
          f"Buy & Hold {fmt_pct(cash.get('bh_max_dd_pct'))}",
          segno_di(cash.get("riduzione_dd_vs_bh"))),
-        ("Sharpe — Cash", fmt_num(cash.get("sharpe")),
-         f"Buy & Hold {fmt_num(cash.get('bh_sharpe'))}", None),
-        ("Resa del capitale impiegato",
-         fmt_pct(reinvest.get("rendimento_capitale_impiegato")),
-         f"conto investito al {fmt_pct(reinvest.get('quota_conto_investita'), 0)}", None),
+        ("Rendimento / oscillazione — Cash", fmt_num(cash.get("rendimento_su_rischio")),
+         f"Buy & Hold {fmt_num(cash.get('ciclo_rendimento_su_rischio'))}",
+         segno_di((cash.get("rendimento_su_rischio") or 0)
+                  - (cash.get("ciclo_rendimento_su_rischio") or 0))),
+        ("Anni in utile — Reinvest",
+         f"{reinvest.get('anni_positivi', 0)}/{reinvest.get('anni_totali', 0)}",
+         f"peggior anno {fmt_pct(reinvest.get('peggior_anno'), 1)}", None),
         ("Premio medio stimato", fmt_pct(cash.get("premio_pct_medio")),
          "del prezzo del sottostante, al mese", None),
         ("Call in-the-money", f"{cash.get('mesi_call_assegnata', 0)}/{cash.get('mesi', 0)}",
          "mesi in cui il cap ha morso", None),
     ])
 
-    usa_ciclo = cash.get("ciclo_cagr") is not None
+    usa_ciclo = cash.get("ciclo_rendimento_medio") is not None
     metro = ("solo sottostante con lo stesso ciclo annuale" if usa_ciclo
              else "Buy &amp; Hold a parita di versamenti")
     dd_cash = cash.get("riduzione_dd_vs_ciclo" if usa_ciclo else "riduzione_dd_vs_bh")
-    extra_re = reinvest.get("extra_cagr_vs_ciclo" if usa_ciclo else "extra_cagr_vs_bh")
+    extra_re = reinvest.get("extra_rendimento_vs_ciclo")
     verdetti = []
     if dd_cash is not None:
         verdetti.append(
@@ -524,7 +575,7 @@ def scheda_sintesi(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
             f"<b>{'inferiore' if dd_cash > 0 else 'superiore'} del {abs(dd_cash):.0%}</b>")
     if extra_re is not None:
         verdetti.append(
-            f"reinvestendo i premi il CAGR e' <b>{abs(extra_re):.1%} "
+            f"reinvestendo i premi il rendimento medio annuo e' <b>{abs(extra_re):.1%} "
             f"{'sopra' if extra_re > 0 else 'sotto'}</b>")
     if verdetti:
         nota(f"Sul periodo analizzato, rispetto al <b>{metro}</b>, " + " e ".join(verdetti) +
@@ -575,6 +626,33 @@ def scheda_opzione(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
             f"Se preferisci evitarlo, tieni i premi in cassa invece di reinvestirli, "
             f"oppure vendi la call a un delta piu' basso."
         )
+    st.markdown("#### Da dove viene il risultato")
+    kpi_cards([
+        ("Movimento delle quote", fmt_currency_compact(cash.get("contributo_prezzo")),
+         "il sottostante che sale o scende", segno_di(cash.get("contributo_prezzo"))),
+        ("Premi incassati", fmt_currency_compact(cash.get("premi_totali")),
+         f"{fmt_pct(cash.get('premio_pct_medio'))} dello spot al mese", "pos"),
+        ("Intrinseco pagato", fmt_currency_compact(-(cash.get("intrinseco_totale") or 0)),
+         f"call ITM in {cash.get('mesi_call_assegnata', 0)} mesi su {cash.get('mesi', 0)}", "neg"),
+        ("Netto delle opzioni", fmt_currency_compact(cash.get("netto_opzioni")),
+         "premi meno intrinseco", segno_di(cash.get("netto_opzioni"))),
+        ("Interessi", fmt_currency_compact(cash.get("interessi_netti")),
+         "su cassa e saldo a debito", segno_di(cash.get("interessi_netti"))),
+        ("Utile netto", fmt_currency_compact(cash.get("pnl_netto")),
+         "somma delle voci precedenti", segno_di(cash.get("pnl_netto"))),
+    ])
+    netto = cash.get("netto_opzioni")
+    if netto is not None and cash.get("premi_totali"):
+        quota_persa = -netto / cash["premi_totali"] if cash["premi_totali"] else 0
+        if netto < 0:
+            nota(f"Le opzioni hanno <b>tolto</b> {fmt_currency_compact(-netto)}: l'intrinseco "
+                 f"pagato ha superato i premi del {quota_persa:.0%}. Su un sottostante che "
+                 f"sale con decisione e' il comportamento atteso di una call venduta vicino "
+                 f"al denaro: per tenere piu' rialzo, abbassa il delta nella sidebar.")
+        else:
+            nota(f"Le opzioni hanno <b>aggiunto</b> {fmt_currency_compact(netto)} netti, "
+                 f"pari al {netto / max(abs(cash.get('pnl_netto') or 1), 1):.0%} dell'utile.")
+
     for chiave in ("premio", "prezzo_strike", "composizione_annuale"):
         if chiave in figure:
             grafico(figure[chiave], key=f"opzione_{chiave}")
@@ -812,23 +890,29 @@ def scheda_dati(risultato: Dict[str, Any], calibrazione: Optional[Dict[str, Any]
         yb = bm.get("yearly")
         if isinstance(yb, pd.DataFrame) and not yb.empty:
             vista_y["risultato_buy_hold"] = yb["risultato_anno"].reindex(vista_y.index)
-            vista_y["twr_buy_hold"] = yb["twr_anno"].reindex(vista_y.index)
+            vista_y["rendimento_buy_hold"] = yb["rendimento_anno"].reindex(vista_y.index)
             vista_y["differenza"] = vista_y["risultato_anno"] - vista_y["risultato_buy_hold"]
-            vista_y["differenza_twr"] = vista_y["twr_anno"] - vista_y["twr_buy_hold"]
-        for c in ("rendimento_sottostante", "twr_anno", "twr_buy_hold", "differenza_twr"):
+            vista_y["differenza_rendimento"] = (vista_y["rendimento_anno"]
+                                                - vista_y["rendimento_buy_hold"])
+        for c in ("rendimento_sottostante", "rendimento_anno", "twr_anno",
+                  "twr_buy_hold", "differenza_twr", "rendimento_buy_hold",
+                  "differenza_rendimento"):
             if c in vista_y.columns:
                 vista_y[c] = vista_y[c].map(lambda v: fmt_pct(v, 1))
         for c in ("premi_incassati", "intrinseco_pagato", "netto_opzioni", "btd_investito",
-                  "btd_da_calo", "btd_da_boost", "versamenti", "capitale_medio_impiegato",
-                  "valore_fine_anno", "risultato_anno", "risultato_buy_hold", "differenza"):
+                  "btd_da_calo", "btd_da_boost", "versamenti", "capitale_investito",
+                  "capitale_medio_impiegato", "valore_fine_anno", "risultato_anno",
+                  "risultato_buy_hold", "differenza"):
             if c in vista_y.columns:
                 vista_y[c] = vista_y[c].map(lambda v: "—" if pd.isna(v) else f"${v:,.0f}")
-        vista_y.columns = [c.replace("_", " ").replace("twr", "TWR").capitalize()
-                           for c in vista_y.columns]
+        vista_y = vista_y.drop(columns=[c for c in ("twr_anno",) if c in vista_y.columns])
+        vista_y.columns = [c.replace("_", " ").capitalize() for c in vista_y.columns]
         st.dataframe(vista_y, **LARGO)
-        st.caption("Le ultime colonne confrontano ogni anno con il solo sottostante che "
-                   "segue lo stesso ciclo annuale: 'Differenza' positiva significa che la "
-                   "strategia ha fatto meglio in quell'anno.")
+        st.caption("Il rendimento di ogni anno e' il risultato diviso il capitale davvero "
+                   "investito in quel ciclo: capitale di gennaio piu' gli acquisti sui cali. "
+                   "I premi reinvestiti non entrano al denominatore perche' arrivano dal "
+                   "mercato. Le ultime colonne confrontano con il solo sottostante che segue "
+                   "lo stesso ciclo annuale.")
 
     st.markdown("#### Serie mensile")
     mdf = risultato["varianti"][scelta]["monthly"]
