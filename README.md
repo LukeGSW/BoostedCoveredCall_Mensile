@@ -7,6 +7,10 @@ Buy-The-Dip potenziati dopo ogni periodo negativo e liquidazione totale a fine a
 Uno **switch in cima alla sidebar** sceglie il passo della strategia — **Mensile** (il
 default, la versione originale) oppure **Settimanale** — e tutto il resto lo segue.
 
+Le decisioni stanno sulla griglia del periodo, ma il conto e' **valorizzato ogni giorno di
+borsa**: e' li' che si vedono i drawdown veri, quelli che una valorizzazione a fine barra
+nasconde (vedi *[Il conto valorizzato ogni giorno](#il-conto-valorizzato-ogni-giorno-non-a-fine-barra)*).
+
 Le curve messe a confronto:
 
 | Curva | Cosa rappresenta |
@@ -473,6 +477,66 @@ La seconda e' la lettura giusta, ed e' quella che la dashboard usa in tutti i gr
 drawdown e nella riga *Riduzione del drawdown*. L'importo in valuta resta nell'annotazione
 del grafico e in una riga a parte della tabella metriche, etichettata per quello che e'.
 
+### Il conto valorizzato ogni giorno, non a fine barra
+
+Il motore **opera** sulla griglia del periodo — una decisione al mese, o alla settimana —
+ma il conto viene **valorizzato ogni giorno di borsa**. Sono due cose diverse, e tenerle
+separate e' quello che rende onesto il numero del rischio.
+
+Se si guarda il conto solo alla chiusura della barra, tutto quello che succede in mezzo
+sparisce. Un crollo del 30% a meta' mese che rientra entro il 31 non lascia traccia: la
+curva mensile passa da un massimo all'altro e il drawdown misurato resta zero. Non e' un
+caso di scuola — e' quello che succede, in piccolo, in ogni backtest valorizzato a fine
+barra, e va sempre nella stessa direzione: **il drawdown misurato cosi' e' sistematicamente
+piu' tenero di quello vero**.
+
+Il caso limite, costruito apposta come test: un sottostante che chiude ogni mese esattamente
+a 100 ma a meta' mese scende a 65 e risale.
+
+| | Drawdown misurato |
+|---|---|
+| Valorizzando a fine mese | **0,00%** su cinque anni |
+| Valorizzando ogni giorno | **−35,0%** |
+
+Su un percorso realistico la differenza e' meno teatrale ma tutt'altro che trascurabile: su
+otto anni al 55% di volatilita', −15,4% a fine mese contro **−28,7%** valorizzando ogni
+giorno, quasi il doppio. E cambia anche il verdetto: la riduzione del drawdown rispetto al
+solo sottostante scende dal 19,3% al **15,6%**, perche' prima si confrontavano due numeri
+entrambi sottostimati, e non nello stesso modo.
+
+**Come si costruisce.** Dentro il periodo la posizione e' nota: le quote coperte si comprano
+all'apertura e non si muovono, gli acquisti sui cali entrano all'apertura, i premi si
+incassano all'apertura, l'intrinseco si paga e i premi si reinvestono alla chiusura. Fra un
+estremo e l'altro cambia solo il prezzo, quindi ogni giorno:
+
+    valore = quote x prezzo + liquidita' - valore della call venduta
+
+La call venduta e' un **debito finche' non scade**, e si segna a mercato con Black-Scholes
+sullo stesso strike e sulla stessa volatilita' implicita con cui il motore ne ha incassato
+il premio, con il tempo residuo che si consuma giorno dopo giorno. All'ultimo giorno il
+tempo residuo e' zero, la formula restituisce il valore intrinseco e la serie giornaliera
+**ritorna esattamente al valore di fine periodo** calcolato dal motore. E' la verifica che
+tiene onesto tutto il resto: nei test lo scarto massimo e' dell'ordine di 10^-10 dollari su
+conti da centomila, su entrambe le cadenze, con e senza cap, con il capitale fisso e con
+quello composto.
+
+**Il peggio visto in giornata.** Oltre alla chiusura si valorizza anche il **minimo** di
+ogni giornata, con lo stesso metodo. E' un'approssimazione dichiarata — nessuno sa in che
+ordine il prezzo abbia toccato i suoi estremi — ma dice quanto in basso e' arrivato il conto
+se in quel momento il prezzo fosse stato il minimo. Nella tabella e' la riga *Peggio visto
+in giornata*.
+
+**Quali numeri guardare.** `max_dd_giornaliero_pct` e' il drawdown vero ed e' quello che la
+dashboard mostra nelle KPI, nel pannello del drawdown di ogni variante, nel confronto
+underwater e nel verdetto contro il benchmark. `max_dd_pct` resta in tabella, etichettato
+*alla chiusura di periodo*, e `dd_nascosto_dal_periodo` dice quanti punti passavano
+inosservati. Un grafico dedicato mette le due curve una sopra l'altra, e un secondo grafico
+confronta le tre frequenze di valorizzazione curva per curva.
+
+**Senza dati giornalieri** — ticker che EODHD non copre al giorno — la dashboard non
+inventa: resta alla valorizzazione di fine periodo e lo dice con un avviso in cima e una
+nota nella scheda del rischio.
+
 ---
 
 ## Seguire la strategia a mercato
@@ -541,6 +605,7 @@ La chiave si puo' passare come variabile d'ambiente `EODHD_API_KEY` oppure in
 app.py                    dashboard Streamlit
 kq_btd_cc/
   cadenza.py              mensile o settimanale: periodi per anno e vocabolario dei testi
+  giornaliero.py          rivalutazione giorno per giorno, call venduta segnata a mercato
   data_api.py             download EODHD (giornaliero, settimanale, mensile) con cache
   vol.py                  stimatori di volatilita' realizzata
   pricing.py              Black-Scholes senza scipy, strike a delta obiettivo
@@ -559,6 +624,11 @@ kq_btd_cc/
 
 ## Cosa e' cambiato rispetto alla versione precedente
 
+- Il conto e' **valorizzato ogni giorno di borsa**, non solo alla chiusura della barra.
+  Prima un crollo rientrato prima di fine mese non compariva da nessuna parte e il drawdown
+  misurato era sistematicamente piu' tenero del vero: su otto anni al 55% di volatilita',
+  −15,4% invece di −28,7%. La call venduta viene segnata a mercato con Black-Scholes finche'
+  non scade, e a ogni fine periodo le due serie coincidono al centesimo.
 - Esiste la **cadenza settimanale**, scelta con lo switch in cima alla sidebar: stessa
   strategia con passo di sette giorni invece di trenta. Piu' premi incassati e molti piu'
   acquisti sui cali; il ciclo annuale non cambia di una virgola.
