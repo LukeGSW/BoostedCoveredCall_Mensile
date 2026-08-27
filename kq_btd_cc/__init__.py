@@ -1,16 +1,29 @@
-"""kq_btd_cc
-Pacchetto per la strategia Boosted Covered Call (mensile) con BTD.
+"""kq_btd_cc — Boosted Covered Call mensile con Buy-The-Dip potenziato.
 
-Contiene:
-- data_api: download e preparazione dati EODHD (OHLC aggiustati)
-- utils: funzioni di utilità per formattazione e plotting
-- style: configurazioni estetiche dei grafici
-- core: logica di simulazione e generazione figure
+Moduli:
+  data_api    download EODHD (mensile/settimanale/giornaliero) con cache
+  vol         stimatori di volatilita' realizzata da OHLC
+  pricing     Black-Scholes senza scipy e stima del premio a delta 0.50
+  engine      motore di backtest (contabilita' a flussi, cap della call reale)
+  metrics     metriche di performance e rischio time-weighted
+  calibration calibrazione del premio stimato su prezzi di opzioni reali
+  charts      grafici Plotly a tema scuro
+  export      pacchetto JSON completo del backtest
+  style       palette, template Plotly e CSS
+  utils       formattazione e helper sui dati
 """
 
-from .style import STYLE_CONFIG
-from .core import esegui_analisi_completa
+from .style import STYLE_CONFIG, PALETTE, TEMPLATE_NAME, CSS
+from .engine import BacktestConfig, run_backtest, VARIANTS
+from .pricing import PremiumModel
+from .metrics import compute_metrics, metrics_table
+from .export import build_export, export_json_bytes
 
-__all__ = ["STYLE_CONFIG", "esegui_analisi_completa"]
+__all__ = [
+    "STYLE_CONFIG", "PALETTE", "TEMPLATE_NAME", "CSS",
+    "BacktestConfig", "run_backtest", "VARIANTS",
+    "PremiumModel", "compute_metrics", "metrics_table",
+    "build_export", "export_json_bytes",
+]
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
