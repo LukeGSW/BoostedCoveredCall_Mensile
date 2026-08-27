@@ -30,6 +30,9 @@ DIZIONARIO_CAMPI: Dict[str, str] = {
     "btd_quota_calo": "Parte dell'acquisto legata all'entita' del calo del mese precedente",
     "btd_quota_boost": "Parte dell'acquisto dovuta al boost pianificato a inizio anno",
     "btd_residuo_anno": "Capitale ancora disponibile sotto il tetto annuo dei BTD",
+    "capitale_impiegato_anno": "Capitale messo al lavoro nel ciclo annuale in corso: "
+                               "capitale fisso piu' i Buy-The-Dip dell'anno. Si azzera "
+                               "a ogni gennaio, a differenza di versamenti_cum",
     "btd_prezzo": "Prezzo di esecuzione dell'acquisto BTD",
     "sigma_stimata": "Volatilita' realizzata annualizzata nota prima dell'inizio del mese",
     "sigma_implicita": "Volatilita' usata per prezzare la call (realizzata x VRP)",
@@ -48,7 +51,8 @@ DIZIONARIO_CAMPI: Dict[str, str] = {
     "liquidazione": "Controvalore liquidato al reset di inizio anno",
     "valore_portafoglio": "Valore totale del conto: quote a mercato piu' cassa",
     "versamento_mese": "Denaro entrato dall'esterno in questo mese",
-    "versamenti_cum": "Denaro entrato dall'esterno dall'inizio del backtest",
+    "versamenti_cum": "Denaro entrato dall'esterno dall'inizio del backtest; non si azzera "
+                      "a gennaio perche' e' il metro con cui si misura l'utile",
     "pnl_netto": "Utile vero: valore_portafoglio meno versamenti_cum",
     "bh_stessi_flussi": "Valore di un buy and hold che riceve gli stessi versamenti e non "
                         "liquida mai; su un sottostante che si moltiplica per ordini di "
