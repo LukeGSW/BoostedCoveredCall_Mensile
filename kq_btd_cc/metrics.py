@@ -1,10 +1,19 @@
 """Metriche di performance e rischio.
 
-Punto chiave: la strategia riceve capitale nuovo durante l'anno (i BTD) e a
-inizio anno puo' richiedere un rabbocco. Calcolare i rendimenti come
-`equity.pct_change()` su una curva gonfiata dai versamenti restituisce numeri
-privi di significato. Qui tutte le metriche di rendimento e rischio sono
-costruite sul RENDIMENTO TIME-WEIGHTED, che neutralizza i flussi:
+La misura di rendimento e' il RENDIMENTO SEMPLICE ANNUO SUL CAPITALE INVESTITO,
+non un tasso composto. La strategia liquida tutto a dicembre e riparte a
+gennaio: ogni anno e' un ciclo chiuso a se' stante, e il numero naturale e'
+quanto ha reso il capitale impiegato in quel ciclo.
+
+    rendimento_anno = risultato dell'anno / (capitale di gennaio + BTD dell'anno)
+
+Al denominatore c'e' solo il denaro che l'investitore tira davvero fuori: i
+premi reinvestiti non entrano, perche' arrivano dal mercato. Un CAGR calcolato
+sul conto intero direbbe altro, perche' il conto include la cassa ferma che non
+lavora e che dopo qualche anno puo' essere meta' del totale.
+
+Il rischio resta misurato sul rendimento time-weighted mensile, che neutralizza
+i flussi di cassa:
 
     r_t = valore_t / (valore_{t-1} + versamenti_t) - 1
 
@@ -58,21 +67,60 @@ def drawdown_durations(dd: pd.Series) -> List[int]:
     return out
 
 
-def _annualize(returns: pd.Series) -> Dict[str, Optional[float]]:
-    r = returns.dropna()
-    r = r[np.isfinite(r)]
-    if r.empty:
-        return {"cagr": None, "vol": None, "sharpe": None, "sortino": None}
-    n = len(r)
-    tot = float(np.prod(1.0 + r.values))
-    anni = n / MESI_ANNO
-    cagr = tot ** (1.0 / anni) - 1.0 if (anni > 0 and tot > 0) else None
-    vol = float(r.std(ddof=1) * np.sqrt(MESI_ANNO)) if n > 1 else None
-    down = r[r < 0]
-    dvol = float(np.sqrt((down.values ** 2).mean()) * np.sqrt(MESI_ANNO)) if len(down) else None
-    sharpe = (cagr / vol) if (cagr is not None and vol) else None
-    sortino = (cagr / dvol) if (cagr is not None and dvol) else None
-    return {"cagr": _f(cagr), "vol": _f(vol), "sharpe": _f(sharpe), "sortino": _f(sortino)}
+def rendimenti_annuali(df: pd.DataFrame) -> pd.DataFrame:
+    """Rendimento semplice di ogni anno sul capitale davvero investito.
+
+    La strategia liquida tutto a dicembre e riparte a gennaio, quindi ogni anno
+    e' un ciclo chiuso: il rendimento naturale e' quello semplice sul capitale
+    impiegato in quel ciclo, non un CAGR calcolato sul conto intero. Il conto
+    include la cassa ferma, che non lavora, e diluisce qualunque tasso composto.
+
+    Il capitale al denominatore e' quello che l'investitore tira davvero fuori:
+    capitale di gennaio piu' gli acquisti sui cali. I premi reinvestiti non
+    entrano, perche' arrivano dal mercato.
+    """
+    if df is None or df.empty or "capitale_impiegato_anno" not in df.columns:
+        return pd.DataFrame()
+    righe, valore_prec = [], 0.0
+    for anno, g in df.groupby("anno", sort=True):
+        versato = float(g["versamento_mese"].sum())
+        valore_fine = float(g["valore_portafoglio"].iloc[-1])
+        risultato = valore_fine - valore_prec - versato
+        capitale = float(g["capitale_impiegato_anno"].iloc[-1])
+        righe.append({
+            "anno": int(anno), "mesi": int(len(g)),
+            "capitale_investito": capitale,
+            "risultato": risultato,
+            "rendimento": risultato / capitale if capitale > 0 else np.nan,
+        })
+        valore_prec = valore_fine
+    return pd.DataFrame(righe).set_index("anno")
+
+
+def _blocco_rendimento(df: pd.DataFrame, prefisso: str = "") -> Dict[str, Any]:
+    """Statistiche sui rendimenti annuali: media, dispersione, rapporto fra i due."""
+    ann = rendimenti_annuali(df)
+    p = prefisso
+    if ann.empty:
+        return {f"{p}rendimento_medio": None, f"{p}rendimento_mediano": None,
+                f"{p}rendimento_volatilita": None, f"{p}rendimento_su_rischio": None,
+                f"{p}anni_positivi": 0, f"{p}anni_totali": 0,
+                f"{p}miglior_anno": None, f"{p}peggior_anno": None,
+                f"{p}capitale_investito_medio": None}
+    r = ann["rendimento"].dropna()
+    media = float(r.mean()) if len(r) else None
+    dev = float(r.std(ddof=1)) if len(r) > 1 else None
+    return {
+        f"{p}rendimento_medio": _f(media),
+        f"{p}rendimento_mediano": _f(r.median()) if len(r) else None,
+        f"{p}rendimento_volatilita": _f(dev),
+        f"{p}rendimento_su_rischio": _f(media / dev) if (media is not None and dev) else None,
+        f"{p}anni_positivi": int((r > 0).sum()),
+        f"{p}anni_totali": int(len(r)),
+        f"{p}miglior_anno": _f(r.max()) if len(r) else None,
+        f"{p}peggior_anno": _f(r.min()) if len(r) else None,
+        f"{p}capitale_investito_medio": _f(ann["capitale_investito"].mean()),
+    }
 
 
 def var_cvar(returns: pd.Series, confidence: float = 0.99) -> Dict[str, Optional[float]]:
@@ -94,8 +142,8 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99) -> Dict[str, Any
         return {}
 
     r = df["twr_mese"]
-    ann = _annualize(r)
     vc = var_cvar(r, confidence)
+    rend = _blocco_rendimento(df)
 
     valore_fin = float(df["valore_portafoglio"].iloc[-1])
     versamenti = float(df["versamenti_cum"].iloc[-1])
@@ -105,9 +153,9 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99) -> Dict[str, Any
     dd_pct = df["dd_twr_pct"]
     maxdd_pct = _f(dd_pct.min())
     durate = drawdown_durations(dd_pct)
-    calmar = (ann["cagr"] / abs(maxdd_pct)) if (ann["cagr"] is not None and maxdd_pct) else None
+    medio = rend["rendimento_medio"]
+    rend_su_dd = (medio / abs(maxdd_pct)) if (medio is not None and maxdd_pct) else None
 
-    twr_tot = float(np.prod(1.0 + r.dropna().values)) - 1.0 if len(r.dropna()) else None
     mesi = int(len(df))
     positivi = int((r > 0).sum())
 
@@ -118,9 +166,6 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99) -> Dict[str, Any
     riduzione_dd = None
     if maxdd_pct is not None and bh["bh_max_dd_pct"]:
         riduzione_dd = 1.0 - abs(maxdd_pct) / abs(bh["bh_max_dd_pct"])
-    extra_cagr = None
-    if ann["cagr"] is not None and bh["bh_cagr"] is not None:
-        extra_cagr = ann["cagr"] - bh["bh_cagr"]
 
     return {
         "periodo_inizio": str(df.index[0].date()),
@@ -141,13 +186,9 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99) -> Dict[str, Any
         "mesi_a_debito": int((df["cassa"] < -1e-9).sum()),
         "interessi_netti": _f(df["interessi"].sum()) if "interessi" in df.columns else None,
 
-        # Rendimento (time-weighted)
-        "twr_totale": _f(twr_tot),
-        "cagr": ann["cagr"],
-        "volatilita_annua": ann["vol"],
-        "sharpe": ann["sharpe"],
-        "sortino": ann["sortino"],
-        "calmar": _f(calmar),
+        # Rendimento: semplice, annuo, sul capitale davvero investito
+        **rend,
+        "rendimento_su_drawdown": _f(rend_su_dd),
 
         # Rischio
         "max_dd_pct": maxdd_pct,
@@ -169,6 +210,11 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99) -> Dict[str, Any
         "premi_totali": _f(df["premio"].sum()),
         "intrinseco_totale": _f(df["intrinseco_pagato"].sum()),
         "netto_opzioni": _f(df["netto_opzione"].sum()),
+        # Decomposizione esatta: quanto viene dal movimento delle quote e quanto
+        # dalle opzioni. Le tre voci sommate danno l'utile netto.
+        "contributo_prezzo": _f(
+            pnl - float(df["netto_opzione"].sum())
+            - (float(df["interessi"].sum()) if "interessi" in df.columns else 0.0)),
         "premio_pct_medio": _f(df.loc[df["premio_pct"] > 0, "premio_pct"].mean()),
         "mesi_call_assegnata": int((df["intrinseco_pagato"] > 0).sum()),
         "btd_numero": int((df["btd_importo"] > 0).sum()),
@@ -184,65 +230,40 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99) -> Dict[str, Any
 
         # Confronto diretto con il benchmark
         "riduzione_dd_vs_bh": _f(riduzione_dd),
-        "extra_cagr_vs_bh": _f(extra_cagr),
         "extra_pnl_vs_bh": _f(pnl - (df["bh_stessi_flussi"].iloc[-1] - versamenti)),
         "extra_pnl_vs_ciclo": _f(pnl - ciclo["ciclo_pnl"]) if ciclo["ciclo_pnl"] is not None else None,
         "riduzione_dd_vs_ciclo": (
             _f(1.0 - abs(maxdd_pct) / abs(ciclo["ciclo_max_dd_pct"]))
             if (maxdd_pct is not None and ciclo["ciclo_max_dd_pct"]) else None),
-        "extra_cagr_vs_ciclo": (
-            _f(ann["cagr"] - ciclo["ciclo_cagr"])
-            if (ann["cagr"] is not None and ciclo["ciclo_cagr"] is not None) else None),
     }
 
 
 def _ciclo_block(df: pd.DataFrame) -> Dict[str, Any]:
     """Solo sottostante con lo stesso ciclo annuale: nessuna opzione, nessun BTD."""
-    vuoto = {"ciclo_valore_finale": None, "ciclo_pnl": None, "ciclo_cagr": None,
-             "ciclo_volatilita_annua": None, "ciclo_sharpe": None,
-             "ciclo_max_dd_pct": None, "ciclo_twr_totale": None}
-    if "ciclo_annuale_twr" not in df.columns or df["ciclo_annuale_twr"].isna().all():
+    vuoto = {"ciclo_valore_finale": None, "ciclo_pnl": None, "ciclo_max_dd_pct": None}
+    if "ciclo_annuale_dd" not in df.columns or df["ciclo_annuale_dd"].isna().all():
         return vuoto
-    r = df["ciclo_annuale_twr"].fillna(0.0)
-    a = _annualize(r)
-    tot = float(np.prod(1.0 + r.dropna().values)) - 1.0 if len(r.dropna()) else None
     return {
         "ciclo_valore_finale": _f(df["ciclo_annuale"].iloc[-1]),
         "ciclo_pnl": _f(df["ciclo_annuale_pnl"].iloc[-1]),
-        "ciclo_cagr": a["cagr"],
-        "ciclo_volatilita_annua": a["vol"],
-        "ciclo_sharpe": a["sharpe"],
         "ciclo_max_dd_pct": _f(df["ciclo_annuale_dd"].min()),
-        "ciclo_twr_totale": _f(tot),
     }
 
 
 def _capitale_al_lavoro(df: pd.DataFrame, impiegato: pd.Series,
                         pnl: float) -> Dict[str, Any]:
-    """Quanto del conto e' davvero investito, e quanto rende quella parte.
+    """Quanto del conto e' davvero investito e quanto resta fermo in cassa.
 
-    Il reset annuale reimpiega solo il capitale fisso e lascia in cassa tutti i
+    Il reset annuale reimpiega solo il capitale deciso e lascia in cassa i
     profitti accumulati: dopo qualche anno una fetta grossa del conto sta ferma.
-    Il CAGR calcolato sul conto intero viene diluito da quella cassa, e non dice
-    piu' se la strategia funziona. Il rendimento sul capitale effettivamente
-    impiegato lo dice.
-
-        rendimento annuo sul capitale impiegato =
-            (1 + utile_netto / capitale_medio_impiegato) ^ (1 / anni) - 1
+    Per questo il rendimento si misura sul capitale investito, non sul conto.
     """
     valore = df["valore_portafoglio"].replace(0, np.nan)
     quota = (impiegato / valore).replace([np.inf, -np.inf], np.nan)
-    anni = len(df) / MESI_ANNO
-    medio = float(impiegato.mean())
-    roi = None
-    if medio > 0 and anni > 0:
-        base = 1.0 + pnl / medio
-        roi = base ** (1.0 / anni) - 1.0 if base > 0 else None
     return {
         "quota_conto_investita": _f(quota.mean()),
         "quota_conto_investita_finale": _f(quota.iloc[-1]),
         "cassa_media": _f(df["cassa"].mean()),
-        "rendimento_capitale_impiegato": _f(roi),
     }
 
 
@@ -277,22 +298,11 @@ def _btd_tetto(df: pd.DataFrame) -> Dict[str, Any]:
 def _bh_block(df: pd.DataFrame, confidence: float) -> Dict[str, Any]:
     """Metriche del Buy & Hold che riceve gli stessi versamenti della strategia."""
     if "bh_twr_mese" not in df.columns:
-        return {"bh_twr_totale": None, "bh_cagr": None, "bh_volatilita_annua": None,
-                "bh_sharpe": None, "bh_sortino": None, "bh_max_dd_pct": None,
-                "bh_max_dd_valore": None, "bh_var_mensile": None, "bh_calmar": None}
+        return {"bh_max_dd_pct": None, "bh_max_dd_valore": None, "bh_var_mensile": None}
     rb = df["bh_twr_mese"]
-    ab = _annualize(rb)
-    dd = _f(df["bh_dd_twr_pct"].min())
-    tot = float(np.prod(1.0 + rb.dropna().values)) - 1.0 if len(rb.dropna()) else None
     return {
-        "bh_twr_totale": _f(tot),
-        "bh_cagr": ab["cagr"],
-        "bh_volatilita_annua": ab["vol"],
-        "bh_sharpe": ab["sharpe"],
-        "bh_sortino": ab["sortino"],
-        "bh_max_dd_pct": dd,
+        "bh_max_dd_pct": _f(df["bh_dd_twr_pct"].min()),
         "bh_max_dd_valore": _f(df["bh_dd_valore"].min()),
-        "bh_calmar": _f(ab["cagr"] / abs(dd)) if (ab["cagr"] is not None and dd) else None,
         "bh_var_mensile": var_cvar(rb, confidence)["var"],
     }
 
@@ -308,21 +318,24 @@ def metrics_table(risultati: Dict[str, Any]) -> pd.DataFrame:
         return pd.DataFrame()
     ordine = [
         "valore_finale", "versamenti_totali", "pnl_netto", "roi_su_versamenti",
-        "twr_totale", "cagr", "volatilita_annua", "sharpe", "sortino", "calmar",
+        "rendimento_medio", "rendimento_mediano", "rendimento_volatilita",
+        "rendimento_su_rischio", "rendimento_su_drawdown",
+        "anni_positivi", "anni_totali", "miglior_anno", "peggior_anno",
+        "capitale_investito_medio",
         "max_dd_pct", "max_dd_valore", "dd_durata_max_mesi",
         "var_mensile", "cvar_mensile", "hit_rate", "miglior_mese", "peggior_mese",
-        "premi_totali", "intrinseco_totale", "netto_opzioni", "premio_pct_medio",
+        "contributo_prezzo", "premi_totali", "intrinseco_totale", "netto_opzioni",
+        "interessi_netti", "premio_pct_medio",
         "mesi_call_assegnata", "btd_numero", "btd_totale",
         "capitale_medio_impiegato", "quota_conto_investita",
-        "rendimento_capitale_impiegato", "cassa_media",
+        "cassa_media",
         "finanziamento_massimo", "mesi_a_debito",
         "btd_prezzo_medio", "btd_quote_comprate", "btd_tagliato_dal_tetto",
         "btd_segnali_saltati", "btd_calo_peggiore_saltato", "anni_con_tetto_esaurito",
-        "ciclo_pnl", "ciclo_cagr", "ciclo_volatilita_annua", "ciclo_sharpe",
-        "ciclo_max_dd_pct", "extra_pnl_vs_ciclo", "riduzione_dd_vs_ciclo",
-        "extra_cagr_vs_ciclo",
-        "bh_cagr", "bh_volatilita_annua", "bh_sharpe", "bh_max_dd_pct",
-        "bh_stessi_flussi_pnl", "riduzione_dd_vs_bh", "extra_cagr_vs_bh", "extra_pnl_vs_bh",
+        "ciclo_rendimento_medio", "ciclo_rendimento_volatilita",
+        "ciclo_rendimento_su_rischio", "extra_rendimento_vs_ciclo",
+        "ciclo_pnl", "ciclo_max_dd_pct", "extra_pnl_vs_ciclo", "riduzione_dd_vs_ciclo",
+        "bh_max_dd_pct", "bh_stessi_flussi_pnl", "riduzione_dd_vs_bh", "extra_pnl_vs_bh",
     ]
     df = pd.DataFrame(righe)
     return df.reindex([k for k in ordine if k in df.index])
@@ -333,12 +346,6 @@ ETICHETTE = {
     "versamenti_totali": "Capitale versato (totale)",
     "pnl_netto": "Utile netto dei versamenti",
     "roi_su_versamenti": "ROI sul capitale versato",
-    "twr_totale": "Rendimento totale (time-weighted)",
-    "cagr": "CAGR",
-    "volatilita_annua": "Volatilita annua",
-    "sharpe": "Sharpe",
-    "sortino": "Sortino",
-    "calmar": "Calmar",
     "max_dd_pct": "Max drawdown (%) — confrontabile",
     "max_dd_valore": "Max drawdown in valuta — dipende dal capitale impiegato",
     "dd_durata_max_mesi": "Drawdown piu lungo (mesi)",
@@ -347,9 +354,11 @@ ETICHETTE = {
     "hit_rate": "Mesi positivi",
     "miglior_mese": "Miglior mese",
     "peggior_mese": "Peggior mese",
+    "interessi_netti": "Interessi netti su cassa e debito",
     "premi_totali": "Premi incassati",
     "intrinseco_totale": "Intrinseco pagato sulle call",
-    "netto_opzioni": "Risultato netto opzioni",
+    "netto_opzioni": "Risultato netto opzioni (premi meno intrinseco)",
+    "contributo_prezzo": "Contributo del movimento delle quote",
     "premio_pct_medio": "Premio medio (% dello spot)",
     "mesi_call_assegnata": "Mesi con call in-the-money",
     "btd_numero": "Numero di acquisti BTD",
@@ -358,7 +367,6 @@ ETICHETTE = {
     "quota_conto_investita": "Quota media del conto investita",
     "quota_conto_investita_finale": "Quota del conto investita a fine periodo",
     "cassa_media": "Cassa media ferma sul conto",
-    "rendimento_capitale_impiegato": "Rendimento annuo sul capitale impiegato",
     "btd_prezzo_medio": "Prezzo medio pagato nei BTD",
     "btd_quote_comprate": "Quote comprate coi BTD",
     "btd_tagliato_dal_tetto": "Acquisti BTD tagliati dal tetto annuo",
@@ -369,34 +377,31 @@ ETICHETTE = {
     "mesi_a_debito": "Mesi con saldo a debito",
     "bh_stessi_flussi_pnl": "Utile del B&H a parita di flussi",
     "ciclo_pnl": "Utile del solo sottostante, stesso ciclo annuale",
-    "ciclo_cagr": "CAGR del solo sottostante, stesso ciclo",
-    "ciclo_volatilita_annua": "Volatilita annua del solo sottostante",
-    "ciclo_sharpe": "Sharpe del solo sottostante",
+    "ciclo_rendimento_medio": "Rendimento medio annuo del solo sottostante",
+    "ciclo_rendimento_volatilita": "Oscillazione dei rendimenti del solo sottostante",
+    "ciclo_rendimento_su_rischio": "Rendimento diviso oscillazione del solo sottostante",
+    "extra_rendimento_vs_ciclo": "Rendimento in piu rispetto al solo sottostante",
     "ciclo_max_dd_pct": "Max drawdown del solo sottostante (%)",
     "extra_pnl_vs_ciclo": "Utile in piu rispetto al solo sottostante",
     "riduzione_dd_vs_ciclo": "Riduzione del drawdown % vs solo sottostante",
-    "extra_cagr_vs_ciclo": "CAGR in piu rispetto al solo sottostante",
-    "bh_cagr": "CAGR del B&H a parita di flussi",
-    "bh_volatilita_annua": "Volatilita annua del B&H",
-    "bh_sharpe": "Sharpe del B&H",
     "bh_max_dd_pct": "Max drawdown del B&H (%)",
     "riduzione_dd_vs_bh": "Riduzione del drawdown vs B&H",
-    "extra_cagr_vs_bh": "CAGR in piu rispetto al B&H",
     "extra_pnl_vs_bh": "Utile in piu rispetto al B&H",
 }
 
 FORMATI = {
-    "roi_su_versamenti": "pct", "twr_totale": "pct", "cagr": "pct",
-    "volatilita_annua": "pct", "max_dd_pct": "pct", "var_mensile": "pct",
+    "roi_su_versamenti": "pct", "max_dd_pct": "pct", "var_mensile": "pct",
+    "rendimento_medio": "pct", "rendimento_mediano": "pct",
+    "rendimento_volatilita": "pct", "miglior_anno": "pct", "peggior_anno": "pct",
+    "rendimento_su_rischio": "num", "rendimento_su_drawdown": "num",
+    "anni_positivi": "int", "anni_totali": "int",
     "cvar_mensile": "pct", "hit_rate": "pct", "miglior_mese": "pct",
     "peggior_mese": "pct", "premio_pct_medio": "pct",
-    "bh_cagr": "pct", "bh_volatilita_annua": "pct", "bh_max_dd_pct": "pct",
-    "riduzione_dd_vs_bh": "pct", "extra_cagr_vs_bh": "pct",
-    "ciclo_cagr": "pct", "ciclo_volatilita_annua": "pct", "ciclo_max_dd_pct": "pct",
-    "riduzione_dd_vs_ciclo": "pct", "extra_cagr_vs_ciclo": "pct", "ciclo_sharpe": "num",
+    "bh_max_dd_pct": "pct", "riduzione_dd_vs_bh": "pct",
+    "ciclo_rendimento_medio": "pct", "ciclo_rendimento_volatilita": "pct",
+    "extra_rendimento_vs_ciclo": "pct", "ciclo_rendimento_su_rischio": "num",
+    "ciclo_max_dd_pct": "pct", "riduzione_dd_vs_ciclo": "pct",
     "quota_conto_investita": "pct", "quota_conto_investita_finale": "pct",
-    "rendimento_capitale_impiegato": "pct",
-    "sharpe": "num", "sortino": "num", "calmar": "num", "bh_sharpe": "num",
     "dd_durata_max_mesi": "int", "mesi_call_assegnata": "int", "btd_numero": "int",
     "mesi_a_debito": "int", "btd_segnali_saltati": "int",
     "anni_con_tetto_esaurito": "int", "btd_quote_comprate": "num",
