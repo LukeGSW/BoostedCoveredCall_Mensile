@@ -1,157 +1,122 @@
-"""Utilità generali per la strategia BTD + Covered Call.
+"""Utilita' di formattazione e piccoli helper sui dati.
 
-Nota: Niente I/O su disco, niente dipendenze non presenti in requirements.txt.
+Nessuna dipendenza da matplotlib: la dashboard usa Plotly.
 """
 from __future__ import annotations
 
-import re
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter, NullFormatter
-from matplotlib.dates import MonthLocator, YearLocator, DateFormatter
 
 
 # ----------------------------------------------------------------------------
-# ANSI / Console helpers (facoltativi)
+# Formattazione
 # ----------------------------------------------------------------------------
-class AnsiColors:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    GREEN = "[32m"
-    RED = "\033[31m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
+def fmt_currency(value: Any, decimali: int = 0, valuta: str = "$") -> str:
+    if value is None or (isinstance(value, float) and not np.isfinite(value)):
+        return "n.d."
+    return f"{valuta}{value:,.{decimali}f}"
 
 
-def colorize(text: str, color_code: str) -> str:
-    return f"{color_code}{text}{AnsiColors.RESET}"
+def fmt_currency_compact(value: Any, valuta: str = "$") -> str:
+    """Formato compatto per i KPI: $1,2M / $340k / $980."""
+    if value is None or (isinstance(value, float) and not np.isfinite(value)):
+        return "n.d."
+    segno = "-" if value < 0 else ""
+    a = abs(float(value))
+    if a >= 1e9:
+        return f"{segno}{valuta}{a / 1e9:,.2f}G"
+    if a >= 1e6:
+        return f"{segno}{valuta}{a / 1e6:,.2f}M"
+    if a >= 10_000:
+        return f"{segno}{valuta}{a / 1e3:,.0f}k"
+    return f"{segno}{valuta}{a:,.0f}"
 
 
-def strip_ansi(text: object) -> object:
-    if isinstance(text, str):
-        ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-        return ansi_escape.sub("", text)
-    return text
+def fmt_pct(value: Any, decimali: int = 2) -> str:
+    if value is None or (isinstance(value, float) and not np.isfinite(value)):
+        return "n.d."
+    return f"{value * 100:,.{decimali}f}%"
 
 
-# ----------------------------------------------------------------------------
-# Formatters
-# ----------------------------------------------------------------------------
-
-def format_currency(value: float) -> str:
-    return f"${value:,.2f}" if pd.notna(value) else "N/A"
+def fmt_num(value: Any, decimali: int = 2) -> str:
+    if value is None or (isinstance(value, float) and not np.isfinite(value)):
+        return "n.d."
+    return f"{value:,.{decimali}f}"
 
 
-def format_percent(value: float) -> str:
-    if pd.isna(value):
-        return "N/A"
-    if value == np.inf:
-        return "+Inf%"
-    if value == -np.inf:
-        return "-Inf%"
-    return f"{value * 100:.2f}%"
-
-
-def format_ratio(value: float, decimals: int = 2) -> str:
-    if pd.isna(value):
-        return "N/A"
-    if value == np.inf:
-        return "+Inf"
-    if value == -np.inf:
-        return "-Inf"
-    return f"{value:.{decimals}f}"
-
-
-def currency_formatter(x: float, pos: int) -> str:
-    return f"${x:,.0f}"
-
-
-def percentage_formatter(x: float, pos: int) -> str:
-    return f"{x:.1f}%"
+def fmt_int(value: Any) -> str:
+    if value is None or (isinstance(value, float) and not np.isfinite(value)):
+        return "n.d."
+    return f"{int(value):,d}"
 
 
 # ----------------------------------------------------------------------------
-# Plot helpers
+# Serie
 # ----------------------------------------------------------------------------
-
-def add_watermark(fig: plt.Figure, text: str) -> None:
-    fig.text(0.99, 0.01, text, fontsize=8, color="gray", ha="right", va="bottom", alpha=0.7)
-
-
-def setup_common_axis_elements(
-    ax: plt.Axes,
-    title: str,
-    xlabel: str,
-    ylabel: str,
-    y_formatter: Optional[FuncFormatter] = None,
-) -> None:
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    if y_formatter:
-        ax.yaxis.set_major_formatter(FuncFormatter(y_formatter))
-    ax.grid(True, linestyle="--", alpha=0.35, axis="y")
+def has_data(series: Optional[pd.Series]) -> bool:
+    return series is not None and not series.empty and series.notna().any()
 
 
-def setup_date_axis(
-    ax: plt.Axes,
-    major_locator_base: int = 1,
-    minor_locator_interval: Optional[int] = None,
-    minor_format: Optional[str] = None,
-) -> None:
-    ax.xaxis.set_major_locator(YearLocator(base=major_locator_base))
-    ax.xaxis.set_major_formatter(DateFormatter("%Y"))
-
-    if minor_locator_interval:
-        ax.xaxis.set_minor_locator(MonthLocator(interval=minor_locator_interval))
-        if minor_format == "null" or minor_format is None:
-            ax.xaxis.set_minor_formatter(NullFormatter())
-        else:
-            ax.xaxis.set_minor_formatter(DateFormatter(minor_format))
-            ax.tick_params(axis="x", which="minor", labelrotation=45)
-    else:
-        ax.xaxis.set_minor_locator(plt.NullLocator())
-
-    plt.setp(ax.get_xticklabels(which="major"), rotation=0, ha="center")
-
-
-# ----------------------------------------------------------------------------
-# Data helpers
-# ----------------------------------------------------------------------------
-
-def check_plot_data(series: pd.Series) -> bool:
-    return series is not None and not series.empty and series.nunique() > 1
-
-
-def compute_drawdown_monetary(equity_series: pd.Series) -> pd.Series:
-    if equity_series is None or equity_series.empty:
+def drawdown_monetario(equity: pd.Series) -> pd.Series:
+    if not has_data(equity):
         return pd.Series(dtype=float)
-    running_max = equity_series.cummax()
-    dd = equity_series - running_max
-    return dd.clip(upper=0)
+    return (equity - equity.cummax()).clip(upper=0.0)
 
 
-def calculate_drawdown_durations(equity_series: pd.Series) -> list[int]:
-    if not check_plot_data(equity_series):
+def drawdown_percentuale(series: pd.Series) -> pd.Series:
+    if not has_data(series):
+        return pd.Series(dtype=float)
+    s = series.astype(float)
+    cm = s.cummax().replace(0, np.nan)
+    return ((s / cm) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(upper=0.0)
+
+
+def json_safe(obj: Any) -> Any:
+    """Rende un oggetto serializzabile in JSON (NaN/inf -> None, Timestamp -> ISO)."""
+    if isinstance(obj, dict):
+        return {str(k): json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    if isinstance(obj, (pd.Timestamp, np.datetime64)):
+        ts = pd.Timestamp(obj)
+        return None if pd.isna(ts) else ts.strftime("%Y-%m-%d")
+    if isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating, float)):
+        v = float(obj)
+        return v if np.isfinite(v) else None
+    if isinstance(obj, (np.ndarray,)):
+        return [json_safe(v) for v in obj.tolist()]
+    if isinstance(obj, pd.Series):
+        return {json_safe(k): json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, pd.DataFrame):
+        return dataframe_to_records(obj)
+    if obj is None or isinstance(obj, (str, int)):
+        return obj
+    if pd.isna(obj):
+        return None
+    return str(obj)
+
+
+def dataframe_to_records(df: pd.DataFrame, index_name: str = "data") -> list:
+    """DataFrame -> lista di dizionari JSON-safe, con l'indice come prima chiave."""
+    if df is None or df.empty:
         return []
-    dd_series = compute_drawdown_monetary(equity_series)
-    durations = []
-    cur = 0
-    in_dd = False
-    for v in dd_series:
-        if v < -1e-9:
-            cur += 1
-            in_dd = True
-        else:
-            if in_dd and cur > 0:
-                durations.append(cur)
-            cur = 0
-            in_dd = False
-    if in_dd and cur > 0:
-        durations.append(cur)
-    return durations
+    out = df.reset_index()
+    if out.columns[0] in ("index", None) or str(out.columns[0]).startswith("level_"):
+        out = out.rename(columns={out.columns[0]: index_name})
+    return [json_safe(rec) for rec in out.to_dict(orient="records")]
+
+
+def safe_div(a: float, b: float, default: Optional[float] = None) -> Optional[float]:
+    try:
+        if b in (0, None) or not np.isfinite(b):
+            return default
+        v = a / b
+        return v if np.isfinite(v) else default
+    except (TypeError, ZeroDivisionError):
+        return default
