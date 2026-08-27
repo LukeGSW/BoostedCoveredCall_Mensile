@@ -451,19 +451,19 @@ def fig_verdetto_vs_bh(risultato: Dict[str, Any]) -> go.Figure:
     # Se il ciclo annuale e' disponibile e' quello il metro giusto: stesso
     # mandato, stessa liquidazione a dicembre, unica differenza le opzioni e i BTD.
     prima = next(iter(risultato.get("varianti", {}).values()), {}).get("metrics") or {}
-    usa_ciclo = prima.get("ciclo_cagr") is not None
+    usa_ciclo = prima.get("ciclo_rendimento_medio") is not None
     k_dd = "riduzione_dd_vs_ciclo" if usa_ciclo else "riduzione_dd_vs_bh"
-    k_cagr = "extra_cagr_vs_ciclo" if usa_ciclo else "extra_cagr_vs_bh"
+    k_rend = "extra_rendimento_vs_ciclo"
     k_mio_dd, k_suo_dd = "max_dd_pct", ("ciclo_max_dd_pct" if usa_ciclo else "bh_max_dd_pct")
-    k_mio_c, k_suo_c = "cagr", ("ciclo_cagr" if usa_ciclo else "bh_cagr")
+    k_mio_c, k_suo_c = "rendimento_medio", "ciclo_rendimento_medio"
     metro = "solo sottostante, stesso ciclo annuale" if usa_ciclo else "Buy & Hold"
 
     righe = []
     for chiave, res in risultato.get("varianti", {}).items():
         mt = res.get("metrics") or {}
-        if mt.get(k_dd) is None and mt.get(k_cagr) is None:
+        if mt.get(k_dd) is None and mt.get(k_rend) is None:
             continue
-        righe.append((res["label"], mt.get(k_dd), mt.get(k_cagr),
+        righe.append((res["label"], mt.get(k_dd), mt.get(k_rend),
                       COLORE_VARIANTE.get(chiave, PALETTE["text"]), mt))
     if not righe:
         return _vuoto("Metriche non disponibili")
@@ -472,7 +472,7 @@ def fig_verdetto_vs_bh(risultato: Dict[str, Any]) -> go.Figure:
     colori = [r[3] for r in righe]
     fig = make_subplots(rows=1, cols=2, horizontal_spacing=0.14,
                         subplot_titles=(f"Drawdown in meno del {metro}",
-                                        f"CAGR in piu del {metro}"))
+                                        f"Rendimento in piu del {metro}"))
 
     fig.add_trace(go.Bar(
         y=etichette, x=[r[1] for r in righe], orientation="h", showlegend=False,
@@ -537,6 +537,33 @@ def fig_btd(risultato: Dict[str, Any], chiave: str = "premi_cash") -> go.Figure:
             hovertemplate="Segnale bloccato dal filtro sul drawdown<extra></extra>",
         ), secondary_y=False)
 
+    # Segnali arrivati a tetto annuo gia' esaurito: sono i piu' insidiosi,
+    # perche' i cali profondi tendono ad arrivare tardi nell'anno, quando il
+    # budget e' stato speso su quelli superficiali.
+    if "btd_saltato_dal_tetto" in df.columns:
+        saltati = df[df["btd_saltato_dal_tetto"].astype(bool)]
+        if not saltati.empty:
+            cali = df["rendimento_mese"].shift(1).reindex(saltati.index)
+            fig.add_trace(go.Scatter(
+                x=saltati.index, y=np.zeros(len(saltati)),
+                name="Segnale saltato: tetto annuo esaurito", mode="markers",
+                marker=dict(color=PALETTE["strike"], size=11, symbol="triangle-up",
+                            line=dict(color=PALETTE["bg"], width=1)),
+                customdata=np.c_[cali.values],
+                hovertemplate=("Tetto annuo gia' esaurito<br>"
+                               "il mese prima aveva fatto %{customdata[0]:.1%}"
+                               "<extra></extra>"),
+            ), secondary_y=False)
+
+        tagliati = df[df["btd_tagliato_dal_tetto"] > 1e-9]
+        if not tagliati.empty:
+            fig.add_trace(go.Bar(
+                x=tagliati.index, y=tagliati["btd_tagliato_dal_tetto"],
+                name="Quota tagliata dal tetto",
+                marker=dict(color=PALETTE["strike"], line=dict(width=0)), opacity=0.35,
+                hovertemplate="Tagliato dal tetto: <b>$%{y:,.0f}</b><extra></extra>",
+            ), secondary_y=False)
+
     fig.add_trace(go.Scatter(
         x=df.index, y=df["close"], name="Prezzo del sottostante",
         line=dict(color=PALETTE["prezzo"], width=1.5),
@@ -550,9 +577,17 @@ def fig_btd(risultato: Dict[str, Any], chiave: str = "premi_cash") -> go.Figure:
     _asse_tempo(fig)
     tot = float(df["btd_importo"].sum())
     n = int((df["btd_importo"] > 0).sum())
-    return _layout(fig, "Acquisti Buy-The-Dip",
-                   f"{n} acquisti per ${tot:,.0f} complessivi. Il tetto annuo azzera gli acquisti "
-                   f"quando il budget dell'anno e' esaurito.", altezza=440)
+    sotto = f"{n} acquisti per ${tot:,.0f} complessivi."
+    if "btd_tagliato_dal_tetto" in df.columns:
+        tagliato = float(df["btd_tagliato_dal_tetto"].sum())
+        saltati = int(df["btd_saltato_dal_tetto"].astype(bool).sum())
+        if tagliato > 1e-9:
+            sotto += (f" Il tetto annuo ha tolto ${tagliato:,.0f} agli acquisti e ne ha "
+                      f"saltati {saltati} del tutto: quando morde, alzare il boost non fa "
+                      f"comprare di piu', fa solo esaurire prima il budget sui cali "
+                      f"superficiali.")
+    fig.update_layout(barmode="overlay")
+    return _layout(fig, "Acquisti Buy-The-Dip", sotto, altezza=460)
 
 
 # ============================================================================
@@ -748,45 +783,48 @@ def fig_rischio_rendimento(risultato: Dict[str, Any]) -> go.Figure:
         tutte["benchmark"] = bm
     for chiave, res in tutte.items():
         mt = res.get("metrics") or {}
-        if mt.get("cagr") is not None and mt.get("volatilita_annua"):
-            punti.append((res["label"], mt["volatilita_annua"], mt["cagr"],
-                          mt.get("sharpe"), COLORE_VARIANTE.get(chiave, PALETTE["text"]),
+        if mt.get("rendimento_medio") is not None and mt.get("rendimento_volatilita"):
+            punti.append((res["label"], mt["rendimento_volatilita"], mt["rendimento_medio"],
+                          mt.get("rendimento_su_rischio"),
+                          COLORE_VARIANTE.get(chiave, PALETTE["text"]),
                           chiave == "benchmark"))
     if not punti:
         return _vuoto("Metriche non disponibili")
 
     fig = go.Figure()
-    # isoquante di Sharpe come sfondo
+    # isoquante del rapporto rendimento/oscillazione come sfondo
     xmax = max(p[1] for p in punti) * 1.35
     xs = np.linspace(0.001, xmax, 60)
     for sh in (0.25, 0.5, 1.0, 1.5):
         fig.add_trace(go.Scatter(
             x=xs, y=sh * xs, mode="lines", showlegend=False, hoverinfo="skip",
             line=dict(color="rgba(148,163,184,0.16)", width=1, dash="dot")))
-        fig.add_annotation(x=xmax * 0.98, y=sh * xmax * 0.98, text=f"Sharpe {sh}",
+        fig.add_annotation(x=xmax * 0.98, y=sh * xmax * 0.98, text=f"rapporto {sh}",
                            showarrow=False, xanchor="right",
                            font=dict(color=PALETTE["text_muted"], size=10))
 
-    for nome, vol, cagr, sharpe, colore, e_bench in punti:
+    for nome, vol, rendimento, rapporto, colore, e_bench in punti:
         fig.add_trace(go.Scatter(
-            x=[vol], y=[cagr], name=nome, mode="markers+text",
+            x=[vol], y=[rendimento], name=nome, mode="markers+text",
             text=[nome], textposition="top center",
             textfont=dict(color=PALETTE["text_muted"], size=11),
             marker=dict(color=colore, size=20 if e_bench else 18,
                         symbol="diamond" if e_bench else "circle",
                         line=dict(color=PALETTE["bg"], width=2)),
-            hovertemplate=(f"<b>{nome}</b><br>Volatilita: %{{x:.1%}}<br>"
-                           f"CAGR: %{{y:.1%}}<br>Sharpe: {sharpe:.2f}<extra></extra>")))
+            hovertemplate=(f"<b>{nome}</b><br>Oscillazione: %{{x:.1%}}<br>"
+                           f"Rendimento: %{{y:.1%}}<br>"
+                           f"rapporto {rapporto:.2f}<extra></extra>")))
 
     fig.add_hline(y=0, line=dict(color=PALETTE["axis"], width=1.1))
-    fig.update_xaxes(tickformat=".0%", title_text="Volatilita annua", showgrid=True,
-                     range=[0, xmax])
-    fig.update_yaxes(tickformat=".0%", title_text="CAGR")
+    fig.update_xaxes(tickformat=".0%", title_text="Oscillazione dei rendimenti annuali",
+                     showgrid=True, range=[0, xmax])
+    fig.update_yaxes(tickformat=".0%", title_text="Rendimento medio annuo")
     fig.update_layout(hovermode="closest")
     return _layout(fig, "Rischio e rendimento",
-                   "Entrambi annualizzati e time-weighted. Il rombo e' il solo sottostante "
-                   "con lo stesso ciclo annuale: le varianti sopra e a sinistra di quel "
-                   "punto stanno facendo meglio.", altezza=440, legenda=False)
+                   "Rendimento medio annuo sul capitale investito contro quanto oscilla da "
+                   "un anno all'altro. Il rombo e' il solo sottostante con lo stesso ciclo "
+                   "annuale: le varianti sopra e a sinistra di quel punto stanno facendo "
+                   "meglio.", altezza=440, legenda=False)
 
 
 # ============================================================================
