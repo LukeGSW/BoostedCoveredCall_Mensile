@@ -24,9 +24,12 @@ Modello (una riga = un mese di calendario):
     resta li' per tutto l'anno. La call venduta NON lo cappa, quindi si tiene
     tutto il rialzo. Sul capitale fisso si incassa il premio e si paga il cap;
     su questo no.
-  * A fine anno si liquida tutto e si ricomincia con lo stesso capitale fisso.
-    L'eventuale eccedenza resta come cassa non impiegata; se manca capitale,
-    si versa la differenza (ed e' un versamento, non un utile).
+  * A fine anno si liquida tutto e si ricomincia. Con `capitale_modo="fisso"`
+    si rimette al lavoro sempre lo stesso importo e l'eccedenza resta in cassa:
+    la strategia non compone, e il conto cresce in linea retta perche' il
+    capitale che lavora non aumenta mai. Con `capitale_modo="composto"` torna
+    al lavoro tutto il conto, mantenendo la proporzione fra parte coperta e
+    parte scoperta, e i profitti si capitalizzano.
 
 Contabilita': due grandezze diverse, da non confondere.
   * `versamenti_cum` e' il denaro entrato dall'esterno dall'inizio del backtest.
@@ -62,6 +65,23 @@ class BacktestConfig:
     # Capitale
     capitale_iniziale: float = 25_000.0        # base coperta, fissata a inizio anno
     capitale_addizionale: float = 0.0          # capitale extra annuo, non coperto
+
+    # Come si decide, ogni gennaio, quanto rimettere al lavoro.
+    #   "fisso"    sempre lo stesso importo: i profitti restano in cassa e la
+    #              strategia NON compone. La curva cresce in linea retta perche'
+    #              il capitale che lavora non aumenta mai.
+    #   "composto" il capitale di gennaio cresce col conto, mantenendo la
+    #              proporzione fra parte coperta e parte scoperta: i profitti
+    #              tornano al lavoro e il rendimento si capitalizza.
+    capitale_modo: str = "fisso"
+
+    # Solo in modalita' composta: quota del conto tenuta liquida a gennaio per
+    # finanziare gli acquisti sui cali durante l'anno, espressa in frazione del
+    # capitale impiegato. Senza riserva ogni Buy-The-Dip richiederebbe denaro
+    # fresco e il capitale versato crescerebbe insieme al conto, il che rende
+    # illeggibile qualunque confronto. In modalita' composta gli acquisti sui
+    # cali si finanziano solo da qui: se la riserva finisce, si comprano meno.
+    riserva_btd_pct: float = 0.75
 
     # Buy-The-Dip
     # BOOST: percentuale del capitale iniziale che si aggiunge a OGNI acquisto
@@ -109,7 +129,8 @@ class BacktestConfig:
 
 VARIANTS = {
     "no_premi":       {"label": "BTD No Premi",             "vende_call": False, "reinveste": False},
-    "premi_cash":     {"label": "BTD + Premi (Cash)",       "vende_call": True,  "reinveste": False},
+    "premi_cash":     {"label": "BTD + Premi (Cash)",       "vende_call": True,  "reinveste": False,
+                       "premi_separati": True},
     "premi_reinvest": {"label": "BTD + Premi (Reinvest)",   "vende_call": True,  "reinveste": True},
 }
 
@@ -189,14 +210,24 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
     vende_call = bool(spec["vende_call"])
     reinveste = bool(spec["reinveste"])
     usa_btd = bool(spec.get("usa_btd", True))
+    # I premi incassati restano in un conto a parte e NON finanziano gli acquisti
+    # sui cali: quelli si pagano con capitale proprio. E' denaro che arriva dal
+    # mercato, non dalle tasche di chi investe, e va tenuto distinto.
+    premi_separati = bool(spec.get("premi_separati", False))
 
     m: pd.DataFrame = market["monthly"]
     dd_weekly: pd.Series = market["dd_weekly"]
     vol_series: pd.Series = market["vol"]
 
-    cap0 = float(cfg.capitale_iniziale)
-    cap_add = float(cfg.capitale_addizionale)
-    capitale_annuo = cap0 + cap_add
+    cap0_base = float(cfg.capitale_iniziale)
+    cap_add_base = float(cfg.capitale_addizionale)
+    capitale_base = cap0_base + cap_add_base
+    componi = str(cfg.capitale_modo) == "composto"
+    # Valori dell'anno in corso: identici alla base in modalita' fissa, scalati
+    # sul conto disponibile in modalita' composta.
+    cap0 = cap0_base
+    cap_add = cap_add_base
+    capitale_annuo = capitale_base
     tetto_btd = (cap0 * float(cfg.btd_cap_annuo_pct)
                  if cfg.btd_cap_annuo_pct else float('inf'))
     boost_per_acquisto = cap0 * float(cfg.boost_pct)
@@ -205,7 +236,8 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
     debito_m = float(cfg.debit_cash_rate) / 12.0
 
     # Stato del conto
-    cassa = 0.0
+    cassa = 0.0            # liquidita' operativa: capitale, liquidazioni, BTD
+    cassa_opzioni = 0.0    # premi incassati e intrinseco pagato, se separati
     quote_coperte = 0.0
     quote_extra = 0.0
     versamenti = 0.0
@@ -232,11 +264,28 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
         # ---------------- Reset annuale ----------------
         if nuovo_anno:
             if anno_corrente is not None:
-                # liquida al close del mese precedente
+                # liquida al close del mese precedente e riunisce i due conti
                 prezzo_liq = float(m.iloc[i - 1]["Close"])
                 liquidazione = (quote_coperte + quote_extra) * prezzo_liq
-                cassa += liquidazione
+                cassa += liquidazione + cassa_opzioni
+                cassa_opzioni = 0.0
                 quote_coperte = quote_extra = 0.0
+            # Quanto rimettere al lavoro quest'anno
+            if componi and cassa > 0:
+                # Una parte resta liquida per comprare sui cali durante l'anno.
+                # Il benchmark non compra sui cali, quindi non trattiene nulla:
+                # tenergli fermo un terzo del conto sarebbe una zavorra falsa.
+                riserva = max(0.0, float(cfg.riserva_btd_pct)) if usa_btd else 0.0
+                capitale_annuo = cassa / (1.0 + riserva)
+            else:
+                capitale_annuo = capitale_base
+            fattore = capitale_annuo / capitale_base if capitale_base > 0 else 1.0
+            cap0 = cap0_base * fattore
+            cap_add = cap_add_base * fattore
+            tetto_btd = (cap0 * float(cfg.btd_cap_annuo_pct)
+                         if cfg.btd_cap_annuo_pct else float("inf"))
+            boost_per_acquisto = cap0 * float(cfg.boost_pct)
+
             manca = capitale_annuo - cassa
             if manca > 0:
                 versamenti += manca
@@ -252,11 +301,12 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
         # Interessi sulla liquidita'. Il saldo puo' andare a debito quando il
         # riacquisto della call a intrinseco supera la cassa disponibile: e' un
         # finanziamento garantito dalle azioni in portafoglio, e come tale costa.
+        totale_liquido = cassa + cassa_opzioni
         interessi = 0.0
-        if cassa > 0 and idle_m:
-            interessi = cassa * idle_m
-        elif cassa < 0 and debito_m:
-            interessi = cassa * debito_m
+        if totale_liquido > 0 and idle_m:
+            interessi = totale_liquido * idle_m
+        elif totale_liquido < 0 and debito_m:
+            interessi = totale_liquido * debito_m
         cassa += interessi
 
         # ---------------- Premio della call ----------------
@@ -275,7 +325,10 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
                 premio_pct = bs_call_price(O, O, T, q["sigma"], pm.r, pm.q) / O
             # il premio e' sempre una % del valore CORRENTE del sottostante
             premio = quote_coperte * O * premio_pct
-            cassa += premio
+            if premi_separati:
+                cassa_opzioni += premio
+            else:
+                cassa += premio
 
         # ---------------- Buy-The-Dip ----------------
         segnale = bool(bar["segnale_btd"])
@@ -316,12 +369,21 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
                     fattore = btd_importo / potenziale
                     quota_calo *= fattore
                     quota_boost *= fattore
-                if cassa < btd_importo:                     # serve denaro fresco
+                if componi:
+                    # niente denaro fresco: si compra solo con la riserva
+                    btd_importo = min(btd_importo, max(0.0, cassa))
+                    if potenziale > 0:
+                        f = btd_importo / potenziale
+                        quota_calo, quota_boost = quota_calo * f, quota_boost * f
+                    tagliato_dal_tetto = max(0.0, potenziale - btd_importo)
+                elif cassa < btd_importo:                   # serve denaro fresco
                     manca = btd_importo - cassa
                     versamenti += manca
                     versato_mese += manca
                     cassa += manca
                     bh_quote += manca / prezzo_btd
+                if btd_importo <= 1e-9:
+                    btd_importo = quota_calo = quota_boost = 0.0
                 cassa -= btd_importo
                 quote_extra += btd_importo / prezzo_btd
                 btd_usato_anno += btd_importo
@@ -332,20 +394,27 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
         intrinseco = 0.0
         if vende_call and cfg.applica_cap and quote_coperte > 0 and np.isfinite(strike):
             intrinseco = quote_coperte * max(0.0, C - strike)
-            cassa -= intrinseco
+            if premi_separati:
+                cassa_opzioni -= intrinseco
+            else:
+                cassa -= intrinseco
 
         netto_opzione = premio - intrinseco
 
         # ---------------- Reinvestimento ----------------
         reinvestito = 0.0
         if reinveste and netto_opzione > 0 and C > 0:
-            reinvestito = min(netto_opzione, max(0.0, cassa))
+            fonte = cassa_opzioni if premi_separati else cassa
+            reinvestito = min(netto_opzione, max(0.0, fonte))
             if reinvestito > 0:
-                cassa -= reinvestito
+                if premi_separati:
+                    cassa_opzioni -= reinvestito
+                else:
+                    cassa -= reinvestito
                 quote_extra += reinvestito / C
 
         # ---------------- Mark to market ----------------
-        valore = (quote_coperte + quote_extra) * C + cassa
+        valore = (quote_coperte + quote_extra) * C + cassa + cassa_opzioni
         rows.append({
             "data": data, "anno": int(data.year),
             "open": O, "close": C,
@@ -368,7 +437,8 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
             "intrinseco_pagato": intrinseco, "netto_opzione": netto_opzione,
             "reinvestito": reinvestito,
             "quote_coperte": quote_coperte, "quote_extra": quote_extra,
-            "cassa": cassa, "interessi": interessi, "liquidazione": liquidazione,
+            "cassa": cassa + cassa_opzioni, "cassa_opzioni": cassa_opzioni,
+            "interessi": interessi, "liquidazione": liquidazione,
             "valore_portafoglio": valore,
             "versamento_mese": versato_mese, "versamenti_cum": versamenti,
             "pnl_netto": valore - versamenti,
@@ -416,9 +486,16 @@ def _yearly_table(df: pd.DataFrame) -> pd.DataFrame:
         risultato = valore_fine - valore_fine_prec - versato
         capitale_medio = float((g["quote_coperte"] + g["quote_extra"]).mul(g["close"]).mean())
         twr_anno = float((1.0 + g["twr_mese"]).prod() - 1.0)
+        # Capitale davvero tirato fuori nell'anno: quello impiegato a gennaio
+        # piu' gli acquisti sui cali. NON comprende i premi reinvestiti, che
+        # sono denaro arrivato dal mercato e non dalle tasche dell'investitore.
+        capitale_investito = float(g["capitale_impiegato_anno"].iloc[-1])
         out.append({
             "anno": int(anno),
             "mesi": int(len(g)),
+            "capitale_investito": capitale_investito,
+            "rendimento_anno": (risultato / capitale_investito
+                                if capitale_investito > 0 else float("nan")),
             "rendimento_sottostante": float(g["close"].iloc[-1] / g["open"].iloc[0] - 1.0),
             "premi_incassati": float(g["premio"].sum()),
             "intrinseco_pagato": float(g["intrinseco_pagato"].sum()),
@@ -633,6 +710,19 @@ def run_backtest(
 
     if not bm.empty:
         benchmark["metrics"] = compute_metrics(bm, cfg.var_confidence)
+        # Confronto col benchmark sul rendimento annuo: si calcola qui, dove il
+        # benchmark e' gia' stato girato, invece che dentro compute_metrics.
+        rb = benchmark["metrics"].get("rendimento_medio")
+        for res in risultati.values():
+            mt = res.get("metrics")
+            if not mt:
+                continue
+            mt["ciclo_rendimento_medio"] = rb
+            mt["ciclo_rendimento_volatilita"] = benchmark["metrics"].get("rendimento_volatilita")
+            mt["ciclo_rendimento_su_rischio"] = benchmark["metrics"].get("rendimento_su_rischio")
+            mio = mt.get("rendimento_medio")
+            mt["extra_rendimento_vs_ciclo"] = (
+                mio - rb if (mio is not None and rb is not None) else None)
 
     # Buy & Hold semplice: solo il capitale iniziale, mai piu' toccato
     capitale_annuo = cfg.capitale_iniziale + cfg.capitale_addizionale
