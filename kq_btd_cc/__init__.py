@@ -1,6 +1,12 @@
-"""kq_btd_cc — Boosted Covered Call mensile con Buy-The-Dip potenziato.
+"""kq_btd_cc — Boosted Covered Call con Buy-The-Dip potenziato, mensile o settimanale.
+
+La cadenza decide solo la lunghezza del passo: mensile (l'originale) o
+settimanale, dove tutto quello che si fa a fine mese si fa a fine settimana.
+Il ciclo annuale — capitale deciso a gennaio, tutto liquidato a dicembre — resta
+identico nelle due versioni.
 
 Moduli:
+  cadenza     mensile o settimanale: periodi per anno e vocabolario dei testi
   data_api    download EODHD (mensile/settimanale/giornaliero) con cache
   vol         stimatori di volatilita' realizzata da OHLC
   pricing     Black-Scholes senza scipy e stima del premio a delta 0.50
@@ -14,6 +20,7 @@ Moduli:
 """
 
 from .style import STYLE_CONFIG, PALETTE, TEMPLATE_NAME, CSS
+from .cadenza import CADENZE, adatta, periodi_anno
 from .engine import BacktestConfig, run_backtest, VARIANTS
 from .pricing import PremiumModel
 from .metrics import compute_metrics, metrics_table
@@ -21,9 +28,10 @@ from .export import build_export, export_json_bytes
 
 __all__ = [
     "STYLE_CONFIG", "PALETTE", "TEMPLATE_NAME", "CSS",
+    "CADENZE", "adatta", "periodi_anno",
     "BacktestConfig", "run_backtest", "VARIANTS",
     "PremiumModel", "compute_metrics", "metrics_table",
     "build_export", "export_json_bytes",
 ]
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
