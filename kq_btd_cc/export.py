@@ -25,6 +25,9 @@ SCHEMA_VERSION = "2.0"
 # Descrizione dei campi della serie mensile: rende il JSON leggibile fra sei mesi.
 DIZIONARIO_CAMPI: Dict[str, str] = {
     "data": "Data di chiusura della barra mensile",
+    "valore_minimo": "Valore del conto se il prezzo fosse rimasto al minimo di giornata",
+    "twr_giorno": "Rendimento time-weighted del giorno, ripulito dai flussi",
+    "dd_intraday_pct": "Quanto sotto il massimo precedente e' arrivato il minimo di giornata",
     "anno": "Anno solare (la strategia si azzera a ogni cambio d'anno)",
     "open": "Apertura del mese, prezzo a cui si impiega il capitale e si fissa lo strike",
     "close": "Chiusura del mese, prezzo di scadenza della call",
@@ -114,8 +117,29 @@ def build_export(
     for chiave, res in tutte.items():
         mdf: pd.DataFrame = res.get("monthly", pd.DataFrame())
         ydf: pd.DataFrame = res.get("yearly", pd.DataFrame())
+        gdf: pd.DataFrame = res.get("daily", pd.DataFrame())
         if mdf.empty:
             continue
+        # Della serie giornaliera si esportano solo le colonne che servono a
+        # rifare i conti sul rischio: per intero moltiplicherebbe per dieci il
+        # peso del file senza aggiungere nulla che non si possa ricalcolare.
+        COLONNE_GIORNALIERE = ["close", "valore_portafoglio", "valore_minimo",
+                               "versamenti_cum", "pnl_netto", "twr_giorno",
+                               "dd_twr_pct", "dd_intraday_pct"]
+        giornaliera = []
+        if not gdf.empty:
+            compatta = gdf[[c for c in COLONNE_GIORNALIERE if c in gdf.columns]].copy()
+            # Arrotondamento: i decimali oltre il centesimo su un conto e oltre la
+            # sesta cifra su una percentuale non dicono nulla e raddoppiano il peso
+            # del file, che con ventisei anni di storico arriverebbe a decine di MB.
+            for c in ("close", "valore_portafoglio", "valore_minimo",
+                      "versamenti_cum", "pnl_netto"):
+                if c in compatta:
+                    compatta[c] = compatta[c].round(2)
+            for c in ("twr_giorno", "dd_twr_pct", "dd_intraday_pct"):
+                if c in compatta:
+                    compatta[c] = compatta[c].round(6)
+            giornaliera = dataframe_to_records(compatta)
         equity = mdf[["valore_portafoglio", "pnl_netto", "versamenti_cum", "indice_twr"]]
         flussi = mdf.loc[mdf["versamento_mese"] > 0, ["versamento_mese", "versamenti_cum"]]
         varianti[chiave] = {
@@ -123,6 +147,7 @@ def build_export(
             "metriche": json_safe(res.get("metrics", {})),
             "equity": dataframe_to_records(equity),
             "serie_mensile": dataframe_to_records(mdf),
+            "serie_giornaliera": giornaliera,
             "tabella_annuale": dataframe_to_records(ydf, index_name="anno"),
             "flussi_di_cassa": dataframe_to_records(flussi),
         }
@@ -156,6 +181,14 @@ def build_export(
                     "versamenti_cum traccia il denaro entrato dall'esterno; "
                     "pnl_netto = valore_portafoglio - versamenti_cum."
                 ),
+                "valorizzazione": (
+                    "Le decisioni stanno sulla griglia del periodo, ma il conto e' "
+                    "rivalutato ogni giorno di borsa: quote per prezzo, piu' liquidita', "
+                    "meno il valore Black-Scholes della call ancora aperta. All'ultimo "
+                    "giorno del periodo il tempo residuo e' zero e la serie giornaliera "
+                    "torna esattamente al valore di fine periodo. Il drawdown da guardare "
+                    "e' max_dd_giornaliero_pct: max_dd_pct e' misurato sulle sole chiusure "
+                    "e non vede i crolli rientrati prima della fine della barra."),
                 "rendimenti": (
                     "Il rendimento di ogni anno e' semplice, non composto: risultato "
                     "dell'anno diviso il capitale davvero investito in quel ciclo "
