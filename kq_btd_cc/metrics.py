@@ -12,6 +12,13 @@ I drawdown sono riportati in tre versioni, perche' misurano cose diverse:
   * `dd_twr_pct`   -> quanto ha perso la strategia in percentuale (pulito dai flussi)
   * `dd_valore`    -> quanto e' sceso il valore del conto in valuta
   * `pnl_dd`       -> quanto e' sceso l'utile netto dei versamenti
+
+Per CONFRONTARE due strategie va usato solo `dd_twr_pct`. Quello in valuta
+dipende da quanto capitale ciascuna sta facendo lavorare: i Buy-The-Dip portano
+la strategia a impiegare piu' denaro del benchmark, quindi in una discesa perde
+piu' dollari pur perdendo una percentuale sensibilmente minore. Su S&P 500
+2000-2026 la variante Cash perde 53.272 dollari contro i 48.338 del benchmark,
+ma il 33,8% contro il 46,3%.
 """
 from __future__ import annotations
 
@@ -269,8 +276,8 @@ ETICHETTE = {
     "sharpe": "Sharpe",
     "sortino": "Sortino",
     "calmar": "Calmar",
-    "max_dd_pct": "Max drawdown (%)",
-    "max_dd_valore": "Max drawdown (valuta)",
+    "max_dd_pct": "Max drawdown (%) — confrontabile",
+    "max_dd_valore": "Max drawdown in valuta — dipende dal capitale impiegato",
     "dd_durata_max_mesi": "Drawdown piu lungo (mesi)",
     "var_mensile": "VaR mensile",
     "cvar_mensile": "CVaR mensile",
@@ -294,7 +301,7 @@ ETICHETTE = {
     "ciclo_sharpe": "Sharpe del solo sottostante",
     "ciclo_max_dd_pct": "Max drawdown del solo sottostante (%)",
     "extra_pnl_vs_ciclo": "Utile in piu rispetto al solo sottostante",
-    "riduzione_dd_vs_ciclo": "Riduzione del drawdown vs solo sottostante",
+    "riduzione_dd_vs_ciclo": "Riduzione del drawdown % vs solo sottostante",
     "extra_cagr_vs_ciclo": "CAGR in piu rispetto al solo sottostante",
     "bh_cagr": "CAGR del B&H a parita di flussi",
     "bh_volatilita_annua": "Volatilita annua del B&H",
