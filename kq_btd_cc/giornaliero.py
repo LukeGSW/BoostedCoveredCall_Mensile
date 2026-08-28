@@ -15,7 +15,9 @@ diventa giornaliera. La posizione dentro il periodo e' nota:
   * le quote coperte si comprano all'apertura del periodo e restano ferme;
   * gli acquisti sui cali entrano all'apertura (o alla chiusura, se configurato);
   * i premi si incassano all'apertura;
-  * l'intrinseco si paga e i premi si reinvestono alla chiusura.
+  * l'intrinseco si paga alla chiusura;
+  * i premi si reinvestono alla chiusura, oppure — se il reinvestimento e'
+    differito al Buy-The-Dip — nello stesso momento dell'acquisto sui cali.
 
 Fra un estremo e l'altro cambia solo il prezzo. Percio' ogni giorno:
 
@@ -125,7 +127,22 @@ def valorizza_giornaliero(
     qc = P["quote_coperte"].to_numpy(float)
     qe_fine = P["quote_extra"].to_numpy(float)
     cassa_fine = P["cassa"].to_numpy(float)
-    reinvestito = P["reinvestito"].to_numpy(float) if "reinvestito" in P else np.zeros(len(P))
+    # Il reinvestimento puo' cadere in due momenti diversi del periodo: alla
+    # chiusura (modalita' "subito") oppure insieme all'acquisto sui cali
+    # (modalita' "al_btd"). Solo quello di chiusura va scorporato dalla
+    # posizione di meta' periodo; quello al BTD e' gia' dentro dal momento in
+    # cui il BTD e' stato eseguito.
+    if "reinvestito_a_chiusura" in P:
+        reinv_chiusura = P["reinvestito_a_chiusura"].to_numpy(float)
+        reinv_btd = P["reinvestito_al_btd"].to_numpy(float)
+    else:
+        reinv_chiusura = (P["reinvestito"].to_numpy(float) if "reinvestito" in P
+                          else np.zeros(len(P)))
+        reinv_btd = np.zeros(len(P))
+    # Se il BTD si esegue alla chiusura, anche i suoi arretrati cadono li'.
+    if btd_al_close:
+        reinv_chiusura = reinv_chiusura + reinv_btd
+    reinvestito = reinv_chiusura
     intrinseco = P["intrinseco_pagato"].to_numpy(float)
     btd_importo = P["btd_importo"].to_numpy(float)
     btd_prezzo = P["btd_prezzo"].to_numpy(float) if "btd_prezzo" in P else np.full(len(P), np.nan)
@@ -143,6 +160,7 @@ def valorizza_giornaliero(
     qe_intra = qe_fine - quote_reinv - quote_btd_close
     cassa_intra = (cassa_fine + intrinseco + reinvestito
                    + (btd_importo if btd_al_close else 0.0))
+    #   (qc + qe_intra) * C + cassa_intra - intrinseco = valore di fine periodo
 
     # Scadenza della call: l'ultimo giorno di borsa del periodo, cosi' il tempo
     # residuo si annulla esattamente li' e la formula restituisce l'intrinseco.
