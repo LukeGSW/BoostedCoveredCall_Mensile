@@ -244,6 +244,7 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99,
         "btd_totale": _f(df["btd_importo"].sum()),
         "btd_medio": _f(df.loc[df["btd_importo"] > 0, "btd_importo"].mean()),
         **_btd_tetto(df),
+        **_reinvestimento(df),
 
         # Benchmark a parita' di flussi
         "bh_stessi_flussi_finale": _f(df["bh_stessi_flussi"].iloc[-1]),
@@ -288,6 +289,45 @@ def _capitale_al_lavoro(df: pd.DataFrame, impiegato: pd.Series,
         "quota_conto_investita_finale": _f(quota.iloc[-1]),
         "cassa_media": _f(df["cassa"].mean()),
     }
+
+
+def _reinvestimento(df: pd.DataFrame) -> Dict[str, Any]:
+    """Quanto del risultato delle opzioni e' tornato al lavoro, e dopo quanto.
+
+    L'attesa media si ricava dalla legge di Little: la somma dei premi fermi a
+    fine di ogni periodo, divisa per i premi incassati, da' il numero medio di
+    periodi che un dollaro di premio passa nel salvadanaio prima di rientrare.
+
+    Il denominatore sono i premi LORDI, perche' e' quello che entra nel
+    salvadanaio: l'intrinseco viene pagato dopo e puo' mandarlo a debito.
+    """
+    if "reinvestito" not in df.columns:
+        return {}
+    reinvestito = float(df["reinvestito"].sum())
+    fuori = {
+        "premi_reinvestiti_totali": _f(reinvestito),
+        "reinvestimenti_numero": int((df["reinvestito"] > 1e-9).sum()),
+    }
+    if "premi_pendenti" not in df.columns:
+        return fuori
+
+    fermi = df["premi_pendenti"].clip(lower=0.0)
+    maturato = float(df["premio"].sum()) if "premio" in df.columns else 0.0
+    # Quello che a dicembre e' ancora nel salvadanaio non viene mai reinvestito:
+    # la liquidazione di fine anno se lo porta via insieme a tutto il resto.
+    mai = float(fermi.groupby(df["anno"]).last().sum()) if "anno" in df.columns else 0.0
+    fuori.update({
+        "premi_in_attesa_medi": _f(fermi.mean()),
+        "premi_in_attesa_max": _f(fermi.max()),
+        "premi_mai_reinvestiti": _f(mai),
+        "attesa_media_periodi": _f(fermi.sum() / maturato) if maturato > 0 else None,
+        "quota_premi_reinvestiti": (_f(reinvestito / maturato) if maturato > 0 else None),
+        # Quanto in basso e' andato il conto delle opzioni: e' il prezzo di aver
+        # speso il premio prima di sapere quanto sarebbe costato il riacquisto.
+        "premi_saldo_minimo": (_f(min(0.0, float(df["cassa_opzioni"].min())))
+                               if "cassa_opzioni" in df.columns else None),
+    })
+    return fuori
 
 
 def _btd_tetto(df: pd.DataFrame) -> Dict[str, Any]:
@@ -354,6 +394,9 @@ def metrics_table(risultati: Dict[str, Any]) -> pd.DataFrame:
         "contributo_prezzo", "premi_totali", "intrinseco_totale", "netto_opzioni",
         "interessi_netti", "premio_pct_medio",
         "mesi_call_assegnata", "btd_numero", "btd_totale",
+        "premi_reinvestiti_totali", "reinvestimenti_numero", "attesa_media_periodi",
+        "premi_in_attesa_medi", "premi_mai_reinvestiti", "quota_premi_reinvestiti",
+        "premi_saldo_minimo",
         "capitale_medio_impiegato", "quota_conto_investita",
         "cassa_media",
         "finanziamento_massimo", "mesi_a_debito",
@@ -402,6 +445,14 @@ ETICHETTE = {
     "premio_pct_medio": "Premio medio (% dello spot)",
     "mesi_call_assegnata": "Mesi con call in-the-money",
     "btd_numero": "Numero di acquisti BTD",
+    "premi_reinvestiti_totali": "Premi rimessi al lavoro",
+    "reinvestimenti_numero": "Numero di reinvestimenti",
+    "premi_in_attesa_medi": "Premi fermi in attesa, in media",
+    "premi_in_attesa_max": "Premi fermi in attesa, al massimo",
+    "premi_mai_reinvestiti": "Premi liquidati a dicembre senza essere reinvestiti",
+    "attesa_media_periodi": "Attesa media prima del reinvestimento (periodi)",
+    "quota_premi_reinvestiti": "Quota dei premi incassati tornata al lavoro",
+    "premi_saldo_minimo": "Saldo piu basso toccato dal conto delle opzioni",
     "btd_totale": "Capitale investito in BTD",
     "capitale_medio_impiegato": "Capitale medio impiegato",
     "quota_conto_investita": "Quota media del conto investita",
@@ -447,6 +498,8 @@ FORMATI = {
     "var_giornaliero": "pct", "peggior_giorno": "pct", "miglior_giorno": "pct",
     "riconciliazione_scarto": "pct",
     "dd_giornaliero_durata_max": "int", "giorni": "int",
+    "reinvestimenti_numero": "int", "attesa_media_periodi": "num",
+    "quota_premi_reinvestiti": "pct",
     "rendimento_medio": "pct", "rendimento_mediano": "pct",
     "rendimento_volatilita": "pct", "miglior_anno": "pct", "peggior_anno": "pct",
     "rendimento_su_rischio": "num", "rendimento_su_drawdown": "num",
