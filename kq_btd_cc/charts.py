@@ -1228,3 +1228,85 @@ def fig_dd_per_frequenza(risultato: Dict[str, Any]) -> go.Figure:
                    f"Lo stesso identico percorso, misurato con tre frequenze diverse. "
                    f"Guardare il conto una volta per barra sottostimava il drawdown fino a "
                    f"<b>{nascosto:.1%}</b>.", altezza=440)
+
+
+# ============================================================================
+# 19. Il salvadanaio dei premi: quando tornano al lavoro
+# ============================================================================
+def fig_reinvestimento(risultato: Dict[str, Any]) -> go.Figure:
+    """Quanto del risultato delle opzioni e' rientrato, e quanto ha aspettato.
+
+    In alto le due curve cumulate: quello che le opzioni hanno prodotto e quello
+    che e' tornato a comprare quote. In basso il salvadanaio, cioe' i premi gia'
+    incassati e non ancora rimessi al lavoro, con un segno a ogni rientro.
+    """
+    res = risultato.get("varianti", {}).get("premi_reinvest")
+    if not res or not isinstance(res.get("monthly"), pd.DataFrame) or res["monthly"].empty:
+        return _vuoto("Nessun dato disponibile")
+    df = res["monthly"]
+    if "reinvestito" not in df.columns:
+        return _vuoto("Questa variante non reinveste i premi")
+
+    cad = _cadenza(risultato)
+    differito = bool((risultato.get("config") or {}).get("reinvesto_modo") == "al_btd")
+    colore = COLORE_VARIANTE.get("premi_reinvest", PALETTE["text"])
+    pendenti = (df["premi_pendenti"].clip(lower=0.0) if "premi_pendenti" in df.columns
+                else pd.Series(0.0, index=df.index))
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.56, 0.44], vertical_spacing=0.08)
+
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["netto_opzione"].cumsum().values,
+        name="Prodotto dalle opzioni (cumulato)",
+        line=dict(color=PALETTE["premio"], width=1.8),
+        hovertemplate=HT_VAL), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["reinvestito"].cumsum().values,
+        name="Rimesso al lavoro (cumulato)",
+        line=dict(color=colore, width=2.2, shape="hv"),
+        hovertemplate=HT_VAL), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=df.index, y=pendenti.values, name="Premi fermi in attesa",
+        line=dict(color=PALETTE["strike"], width=1.5, shape="hv"),
+        fill="tozeroy", fillcolor=_rgba(PALETTE["strike"], 0.18),
+        hovertemplate=HT_VAL), row=2, col=1)
+
+    rientri = df[df["reinvestito"] > 1e-9]
+    if not rientri.empty:
+        # Sul differito il rientro coincide con un acquisto sui cali: si segna
+        # sul prezzo pagato, che e' il punto di tutta l'operazione.
+        al_btd = ("reinvestito_al_btd" in df.columns
+                  and rientri["reinvestito_al_btd"] > 1e-9)
+        simbolo = np.where(al_btd, "triangle-down", "circle") if differito else "circle"
+        fig.add_trace(go.Scatter(
+            x=rientri.index, y=rientri["reinvestito"].values, name="Rientro",
+            mode="markers",
+            marker=dict(color=colore, size=8, symbol=simbolo,
+                        line=dict(color=PALETTE["bg"], width=1)),
+            hovertemplate="Rientrato: <b>$%{y:,.0f}</b><extra></extra>"), row=2, col=1)
+
+    _bande_anni(fig, df.index, riga=1)
+    fig.update_yaxes(tickprefix="$", title_text="Cumulato", row=1, col=1)
+    fig.update_yaxes(tickprefix="$", title_text="In attesa / rientro", row=2, col=1)
+    _asse_tempo(fig, selettore=False, riga=1)
+    _asse_tempo(fig, selettore=False, riga=2)
+
+    mt = res.get("metrics", {})
+    attesa = mt.get("attesa_media_periodi")
+    mai = mt.get("premi_mai_reinvestiti")
+    if differito:
+        sub = ("I premi restano fermi finche' non scatta un acquisto sui cali, poi entrano "
+               "tutti insieme e al lordo, allo stesso prezzo del BTD")
+        if attesa is not None:
+            sub += f": in media aspettano {attesa:.1f} mesi"
+        if mai:
+            sub += (f", e {mai:,.0f} $ sono stati liquidati a dicembre senza aver mai "
+                    f"fatto in tempo a rientrare")
+        sub += "."
+    else:
+        sub = ("I premi rientrano subito, alla chiusura di ogni mese: il salvadanaio resta "
+               "quasi sempre vuoto. Prova la modalita' differita nella sidebar per "
+               "comprarli sui ribassi.")
+    return _layout(fig, "Il salvadanaio dei premi", sub, altezza=560, cad=cad)
