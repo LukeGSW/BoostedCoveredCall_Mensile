@@ -53,6 +53,11 @@ DIZIONARIO_CAMPI: Dict[str, str] = {
     "intrinseco_pagato": "Valore intrinseco pagato a scadenza se la call e' in-the-money",
     "netto_opzione": "Premio meno intrinseco: risultato netto della call nel mese",
     "reinvestito": "Importo reinvestito in quote (solo variante Reinvest)",
+    "reinvestito_al_btd": "Parte del reinvestimento entrata insieme all'acquisto sui cali, "
+                          "allo stesso prezzo",
+    "reinvestito_a_chiusura": "Parte del reinvestimento entrata alla chiusura del mese",
+    "premi_pendenti": "Premi gia' incassati e non ancora rimessi al lavoro (salvadanaio)",
+    "premi_investiti_cum": "Premi rimessi al lavoro dall'inizio del backtest",
     "quote_coperte": "Quote coperte dalla covered call, costanti nell'anno",
     "quote_extra": "Quote non coperte (capitale addizionale, BTD, reinvestimenti)",
     "cassa": "Liquidita' totale del conto, operativa piu' quella dei premi; negativa "
@@ -181,6 +186,16 @@ def build_export(
                     "versamenti_cum traccia il denaro entrato dall'esterno; "
                     "pnl_netto = valore_portafoglio - versamenti_cum."
                 ),
+                "reinvestimento": (
+                    "Solo variante Reinvest. Con reinvesto_modo='subito' il risultato netto "
+                    "delle opzioni compra quote alla chiusura di ogni periodo. Con 'al_btd' "
+                    "i premi si accumulano nel conto opzioni e rientrano tutti insieme al "
+                    "prossimo acquisto sui cali, AL LORDO e compreso il premio del periodo "
+                    "in corso, allo stesso prezzo del BTD; l'intrinseco viene pagato dopo, a "
+                    "scadenza, e puo' mandare a debito il conto opzioni (vedi "
+                    "premi_saldo_minimo). Quello ancora fermo a dicembre viene liquidato con "
+                    "il resto. In entrambi i casi i premi stanno in un conto separato e non "
+                    "finanziano gli acquisti sui cali, che restano capitale proprio."),
                 "valorizzazione": (
                     "Le decisioni stanno sulla griglia del periodo, ma il conto e' "
                     "rivalutato ogni giorno di borsa: quote per prezzo, piu' liquidita', "
