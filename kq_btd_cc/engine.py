@@ -50,6 +50,30 @@ Contabilita': due grandezze diverse, da non confondere.
     Questo SI azzera a ogni gennaio, insieme a tutto il resto.
 I rendimenti sono time-weighted, quindi ripuliti dai flussi.
 
+QUANDO SI REINVESTONO I PREMI (solo variante Reinvest). Due modi, scelti da
+`reinvesto_modo`:
+  * "subito"  ogni periodo, alla chiusura, si comprano quote con il risultato
+              netto delle opzioni appena incassato. E' il comportamento storico.
+  * "al_btd"  i premi si accumulano in un salvadanaio e ci restano finche' non
+              scatta un acquisto sui cali: a quel punto entra tutto insieme, allo
+              stesso prezzo del Buy-The-Dip. Si comprano premi arretrati sul
+              ribasso invece che al prezzo corrente, qualunque esso sia.
+
+Nel BTD il premio entra LORDO, compreso quello del periodo in corso, che e' stato
+accreditato all'apertura poche righe prima. E' quello che succede su un conto
+vero: quando vendi la call il premio e' cassa disponibile subito, e se il ribasso
+arriva prima della scadenza lo spendi senza aspettare di sapere quanto ti costera'
+il riacquisto. L'intrinseco si paga dopo, a scadenza, e si scala dal conto delle
+opzioni, che puo' andare a debito e in quel caso paga interessi come qualunque
+altro saldo negativo. Il vantaggio e' che nel frattempo quel premio ha comprato
+quote e ha lavorato; il costo e' che si e' speso denaro prima di sapere quanto
+sarebbe rimasto. Se le scadenze precedenti hanno gia' prosciugato il conto delle
+opzioni non si compra a debito: si versa quello che c'e'.
+
+Il salvadanaio si azzera al reset di gennaio insieme a tutto il resto: i premi
+incassati a novembre senza piu' un calo davanti restano in cassa e vengono
+liquidati, esattamente come nella variante Cash.
+
 VALORIZZAZIONE. Il motore decide e opera sulla griglia del periodo, ma il conto
 viene poi rivalutato GIORNO PER GIORNO da `giornaliero.py`, che ricostruisce la
 posizione dentro il periodo e segna a mercato anche la call venduta. Serve
@@ -131,6 +155,12 @@ class BacktestConfig:
     btd_dd_weekly_limit: float = -0.90         # blocca il BTD se il DD weekly e' sotto
     btd_execution: str = "open"                # "open" (mese del segnale) | "close" (legacy)
 
+    # Quando la variante Reinvest rimette al lavoro il risultato netto delle
+    # opzioni. "subito" alla chiusura di ogni periodo, "al_btd" solo insieme al
+    # prossimo acquisto sui cali, allo stesso prezzo. Sulle altre due varianti
+    # non ha alcun effetto: una non vende call, l'altra tiene i premi in cassa.
+    reinvesto_modo: str = "subito"             # "subito" | "al_btd"
+
     # Opzione
     strike_mode: str = "delta"                 # "delta" (0.50) | "atm_spot"
     applica_cap: bool = True                   # riacquisto a intrinseco a scadenza
@@ -172,7 +202,13 @@ VARIANTS = {
     "no_premi":       {"label": "BTD No Premi",             "vende_call": False, "reinveste": False},
     "premi_cash":     {"label": "BTD + Premi (Cash)",       "vende_call": True,  "reinveste": False,
                        "premi_separati": True},
-    "premi_reinvest": {"label": "BTD + Premi (Reinvest)",   "vende_call": True,  "reinveste": True},
+    # Anche qui i premi stanno in un conto separato: cosi' non finanziano gli
+    # acquisti sui cali (che restano capitale proprio) e l'unica differenza fra
+    # "subito" e "al_btd" e' il momento in cui tornano al lavoro, non la
+    # contabilita'. Prima i premi finivano nella cassa generale e riducevano di
+    # nascosto il capitale versato per il BTD.
+    "premi_reinvest": {"label": "BTD + Premi (Reinvest)",   "vende_call": True,  "reinveste": True,
+                       "premi_separati": True},
 }
 
 # Il termine di paragone: stesso identico ciclo annuale della strategia (capitale
@@ -295,6 +331,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
     spec = TUTTE_LE_SPEC[variant]
     vende_call = bool(spec["vende_call"])
     reinveste = bool(spec["reinveste"])
+    reinvesto_al_btd = reinveste and str(cfg.reinvesto_modo) == "al_btd"
     usa_btd = bool(spec.get("usa_btd", True))
     # I premi incassati restano in un conto a parte e NON finanziano gli acquisti
     # sui cali: quelli si pagano con capitale proprio. E' denaro che arriva dal
@@ -328,6 +365,12 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
     # Stato del conto
     cassa = 0.0            # liquidita' operativa: capitale, liquidazioni, BTD
     cassa_opzioni = 0.0    # premi incassati e intrinseco pagato, se separati
+    # Salvadanaio del reinvestimento differito: risultato netto delle opzioni
+    # gia' maturato e non ancora rimesso al lavoro. In modalita' "al_btd" a fine
+    # periodo vale sempre quanto `cassa_opzioni`, ed e' l'invariante che lo
+    # tiene onesto. Il denaro sta in `cassa_opzioni`, qui c'e' solo il conto.
+    premi_pendenti = 0.0
+    premi_investiti = 0.0
     quote_coperte = 0.0
     quote_extra = 0.0
     versamenti = 0.0
@@ -386,6 +429,8 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
             quote_coperte = cap0 / O
             quote_extra = cap_add / O
             btd_usato_anno = 0.0
+            # Il salvadanaio e' stato liquidato insieme a tutto il resto.
+            premi_pendenti = 0.0
             anno_corrente = data.year
 
         # Interessi sulla liquidita'. Il saldo puo' andare a debito quando il
@@ -437,6 +482,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
         btd_importo = 0.0
         quota_calo = 0.0
         quota_boost = 0.0
+        reinvestito_btd = 0.0
         potenziale = 0.0
         tagliato_dal_tetto = 0.0
         prezzo_btd = O if cfg.btd_execution == "open" else C
@@ -480,6 +526,28 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
             else:
                 btd_importo = quota_calo = quota_boost = 0.0
 
+        # ---------------- Premi arretrati, insieme al Buy-The-Dip ----------------
+        # Il salvadanaio si svuota solo se un acquisto sui cali e' avvenuto
+        # davvero: un segnale bloccato dal filtro o azzerato dal tetto non conta.
+        # Entra al prezzo del BTD, che e' il punto: si comprano i premi arretrati
+        # sul ribasso invece che al prezzo corrente qualunque esso sia.
+        #
+        # Si versa tutto quello che il conto delle opzioni ha in cassa, premio del
+        # periodo in corso COMPRESO: e' stato accreditato all'apertura, poche
+        # righe piu' su, ed e' denaro disponibile esattamente come su un conto
+        # vero. Il suo intrinseco si paghera' a scadenza, piu' avanti, e potra'
+        # mandare a debito il conto delle opzioni. Aspettare di conoscerlo
+        # significherebbe lasciare fermo un mese di premio proprio nel momento in
+        # cui il ribasso lo renderebbe piu' utile.
+        if reinvesto_al_btd and btd_importo > 1e-9 and cassa_opzioni > 1e-9:
+            arretrati = cassa_opzioni
+            if arretrati > 1e-9 and prezzo_btd > 0:
+                cassa_opzioni -= arretrati
+                quote_extra += arretrati / prezzo_btd
+                premi_pendenti -= arretrati
+                premi_investiti += arretrati
+                reinvestito_btd = arretrati
+
         # ---------------- Scadenza della call ----------------
         intrinseco = 0.0
         if vende_call and cfg.applica_cap and quote_coperte > 0 and np.isfinite(strike):
@@ -492,16 +560,22 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
         netto_opzione = premio - intrinseco
 
         # ---------------- Reinvestimento ----------------
-        reinvestito = 0.0
-        if reinveste and netto_opzione > 0 and C > 0:
+        reinvestito_chiusura = 0.0
+        if reinvesto_al_btd:
+            # Il netto di questo periodo entra nel salvadanaio: sara' disponibile
+            # dal prossimo acquisto sui cali in poi, mai per quello appena fatto.
+            premi_pendenti += netto_opzione
+        elif reinveste and netto_opzione > 0 and C > 0:
             fonte = cassa_opzioni if premi_separati else cassa
-            reinvestito = min(netto_opzione, max(0.0, fonte))
-            if reinvestito > 0:
+            reinvestito_chiusura = min(netto_opzione, max(0.0, fonte))
+            if reinvestito_chiusura > 0:
                 if premi_separati:
-                    cassa_opzioni -= reinvestito
+                    cassa_opzioni -= reinvestito_chiusura
                 else:
-                    cassa -= reinvestito
-                quote_extra += reinvestito / C
+                    cassa -= reinvestito_chiusura
+                quote_extra += reinvestito_chiusura / C
+                premi_investiti += reinvestito_chiusura
+        reinvestito = reinvestito_btd + reinvestito_chiusura
 
         # ---------------- Mark to market ----------------
         valore = (quote_coperte + quote_extra) * C + cassa + cassa_opzioni
@@ -526,6 +600,13 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
             "premio_pct": premio_pct, "premio": premio,
             "intrinseco_pagato": intrinseco, "netto_opzione": netto_opzione,
             "reinvestito": reinvestito,
+            # Separati perche' cadono in due momenti diversi del periodo: gli
+            # arretrati al prezzo del BTD, il resto alla chiusura. La
+            # rivalutazione giornaliera ha bisogno di sapere quale dei due.
+            "reinvestito_al_btd": reinvestito_btd,
+            "reinvestito_a_chiusura": reinvestito_chiusura,
+            "premi_pendenti": premi_pendenti,
+            "premi_investiti_cum": premi_investiti,
             "quote_coperte": quote_coperte, "quote_extra": quote_extra,
             "cassa": cassa + cassa_opzioni, "cassa_opzioni": cassa_opzioni,
             "interessi": interessi, "liquidazione": liquidazione,
