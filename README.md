@@ -259,6 +259,63 @@ anno, con la liquidazione, i due conti si riuniscono.
 Il risultato non cambia, cambia la lettura: senza la separazione i premi riducevano i
 versamenti necessari e non si capiva piu' quanto capitale la strategia richiedesse davvero.
 
+Lo stesso vale per la variante **Reinvest**: anche li' i premi stanno in un conto separato.
+Prima finivano nella cassa generale e riducevano di nascosto il capitale versato per i
+Buy-The-Dip — la stessa cosa che si era voluta togliere alla variante Cash.
+
+### Quando i premi tornano al lavoro
+
+Solo per la variante **Reinvest**, e scelto da un selettore nella sidebar sotto *Buy-The-Dip*:
+
+| | Cosa succede |
+|---|---|
+| **Subito** (default) | il risultato netto delle opzioni compra quote alla chiusura di ogni periodo, al prezzo che c'e' in quel momento |
+| **Al prossimo acquisto sui cali** | restano fermi in un conto a parte e rientrano tutti insieme, **al lordo**, quando scatta un Buy-The-Dip, **allo stesso prezzo del BTD** |
+
+L'idea del secondo modo: i premi si accumulano mentre il mercato sale e rientrano su un
+ribasso, invece che al prezzo corrente qualunque esso sia. L'esempio, in cadenza mensile:
+si incassa il premio di gennaio, il mercato sale, si incassa quello di febbraio; febbraio
+chiude in negativo, quindi a marzo scatta il BTD, e in quel momento entrano nel mercato il
+premio di gennaio, quello di febbraio **e anche quello di marzo**, al prezzo di apertura di
+marzo. Verificato al centesimo in un test costruito apposta.
+
+**Il premio entra lordo.** Anche quello del periodo in corso, incassato all'apertura poche
+ore prima del BTD. E' quello che succede su un conto vero: quando vendi la call il premio
+e' cassa disponibile subito, e se il ribasso arriva prima della scadenza lo spendi senza
+aspettare di sapere quanto ti costera' il riacquisto. L'intrinseco si paga dopo, a
+scadenza, e si scala dal conto delle opzioni — che puo' andare a debito, e in quel caso
+paga interessi come qualunque altro saldo negativo, al tasso impostato nella sidebar. Il
+vantaggio e' che nel frattempo quel premio ha comprato quote e ha lavorato; il costo e' che
+si e' speso denaro prima di sapere quanto ne sarebbe rimasto. La metrica *Saldo piu basso
+toccato dal conto delle opzioni* dice quanto in profondita' si e' arrivati.
+
+L'unico limite e' la cassa vera: se le scadenze precedenti hanno gia' prosciugato il conto
+delle opzioni non si compra a debito, si versa quello che c'e'.
+
+Altre due cose da sapere:
+
+- **Si rientra solo se il BTD e' avvenuto davvero.** Un segnale bloccato dal filtro sul
+  drawdown, o azzerato dal tetto annuo, non apre la porta: non c'e' acquisto, non c'e'
+  rientro.
+- **Il salvadanaio si azzera a gennaio.** I premi incassati a novembre e dicembre senza
+  piu' un calo davanti restano in cassa e vengono liquidati con tutto il resto, come nella
+  variante Cash. La metrica *Premi liquidati a dicembre senza essere reinvestiti* dice
+  quanto e' successo.
+
+**Non e' automaticamente meglio.** Comprare su un ribasso e' un vantaggio, ma aspettare in
+un mercato che sale e' uno svantaggio, e quale dei due prevalga dipende da quanto spesso
+scattano i BTD. Nei test sintetici a otto anni, in cadenza mensile i premi rientrano a un
+prezzo medio **0,5% piu' basso** e il conto finisce piu' in alto; in cadenza settimanale i
+BTD sono cosi' frequenti che l'attesa media e' di due centesimi di settimana, lo sconto non
+fa in tempo a maturare e si finisce per pagare **poco piu' in alto**. In entrambi i casi il
+drawdown vero peggiora di qualche decimo, perche' si e' investito prima e piu': e' la
+stessa aggressivita' che dovrebbe pagare. Il selettore serve a misurarlo sul proprio
+sottostante, non a dare per scontato il verdetto.
+
+La scheda *Opzione e premio* ha un grafico dedicato — il salvadanaio, i rientri e le due
+curve cumulate di quanto le opzioni hanno prodotto e quanto e' tornato al lavoro — e le
+metriche riportano attesa media, quota rientrata e premi mai reinvestiti.
+
 ### Il vero freno: meta' del conto sta ferma
 
 Il reset annuale reimpiega solo il capitale fisso e lascia in cassa tutti i profitti
@@ -624,6 +681,11 @@ kq_btd_cc/
 
 ## Cosa e' cambiato rispetto alla versione precedente
 
+- Nella variante Reinvest si puo' scegliere **quando** i premi tornano al lavoro: subito
+  alla chiusura del periodo, oppure fermi in un salvadanaio finche' non scatta un acquisto
+  sui cali, per rientrare **al lordo** e allo stesso prezzo del BTD, con l'intrinseco pagato
+  poi a scadenza. E in entrambi i modi i premi non
+  finanziano piu' di nascosto i Buy-The-Dip.
 - Il conto e' **valorizzato ogni giorno di borsa**, non solo alla chiusura della barra.
   Prima un crollo rientrato prima di fine mese non compariva da nessuna parte e il drawdown
   misurato era sistematicamente piu' tenero del vero: su otto anni al 55% di volatilita',
