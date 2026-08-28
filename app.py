@@ -277,6 +277,20 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                      "Questo e' il tasso applicato a quel finanziamento.") / 100.0
 
         with st.expander("Buy-The-Dip", expanded=True):
+            reinvesto_label = st.radio(
+                _a("Quando reinvestire i premi (solo variante Reinvest)"),
+                [_a("Subito, alla chiusura del mese"),
+                 _a("Al prossimo acquisto sui cali")], index=0,
+                help=_a("Sulla variante Reinvest. Subito: il risultato netto delle opzioni "
+                        "compra quote alla chiusura di ogni mese, al prezzo che c'e' in quel "
+                        "momento. Al prossimo acquisto sui cali: i premi restano in un conto "
+                        "a parte finche' non scatta un BTD, e allora entrano tutti insieme e "
+                        "AL LORDO, compreso quello del mese in corso, allo stesso prezzo del "
+                        "BTD. L'intrinseco si paga dopo, a scadenza, e puo' mandare a debito "
+                        "il conto delle opzioni: e' il prezzo di aver messo il premio al "
+                        "lavoro subito. Quello che a dicembre non e' ancora rientrato viene "
+                        "liquidato con il resto."))
+            reinvesto_modo = ("al_btd" if "cali" in reinvesto_label else "subito")
             boost = st.slider(
                 "BTD Boost", 0.0, 15.0, 5.0, 0.5,
                 help="Percentuale del capitale iniziale che si aggiunge a OGNI acquisto BTD, "
@@ -437,6 +451,7 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
         "capitale_modo": capitale_modo,
         "riserva_btd_pct": float(riserva),
         "boost_pct": float(boost),
+        "reinvesto_modo": reinvesto_modo,
         "btd_dd_weekly_limit": float(limite_dd),
         "btd_execution": "open" if esecuzione.startswith("Apertura") else "close",
         "strike_mode": "atm_spot" if strike_atm else "delta",
@@ -726,7 +741,22 @@ def scheda_opzione(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
             nota(f"Le opzioni hanno <b>aggiunto</b> {fmt_currency_compact(netto)} netti, "
                  f"pari al {netto / max(abs(cash.get('pnl_netto') or 1), 1):.0%} dell'utile.")
 
-    for chiave in ("premio", "prezzo_strike", "composizione_annuale"):
+    rein = risultato["varianti"].get("premi_reinvest", {}).get("metrics", {})
+    if cfg.get("reinvesto_modo") == "al_btd" and rein.get("attesa_media_periodi") is not None:
+        nota(
+            A(f"<b>Reinvestimento differito.</b> I premi non comprano quote alla chiusura "
+              f"del mese: restano in un conto a parte e rientrano tutti insieme al prossimo "
+              f"acquisto sui cali, <b>al lordo</b> e allo stesso prezzo del BTD. "
+              f"L'intrinseco si paga poi a scadenza. In media hanno aspettato "
+              f"{rein['attesa_media_periodi']:.1f} mesi")
+            + (f", e {fmt_currency_compact(rein.get('premi_mai_reinvestiti'))} sono stati "
+               f"liquidati a dicembre senza fare in tempo a rientrare"
+               if rein.get("premi_mai_reinvestiti") else "")
+            + f". In tutto e' tornato al lavoro il "
+              f"{fmt_pct(rein.get('quota_premi_reinvestiti'))} di quello che le opzioni "
+              f"hanno prodotto."
+        )
+    for chiave in ("premio", "prezzo_strike", "reinvestimento", "composizione_annuale"):
         if chiave in figure:
             grafico(figure[chiave], key=f"opzione_{chiave}")
 
