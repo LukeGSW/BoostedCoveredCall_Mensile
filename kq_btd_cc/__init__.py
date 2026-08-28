@@ -36,4 +36,4 @@ __all__ = [
     "build_export", "export_json_bytes",
 ]
 
-__version__ = "2.2.0"
+__version__ = "2.3.1"
