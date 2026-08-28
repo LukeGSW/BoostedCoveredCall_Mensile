@@ -93,6 +93,8 @@ CATALOGO: List[Tuple[str, str, str, Callable[[Dict[str, Any]], Any], bool]] = [
      lambda r, **kw: charts.fig_premio_stimato(r, kw.get("variante", "premi_cash")), False),
     ("prezzo_strike", "mostra_grafico_strike", "Prezzo del sottostante e strike",
      lambda r, **kw: charts.fig_prezzo_strike(r, kw.get("variante", "premi_cash")), False),
+    ("reinvestimento", "mostra_grafico_premio", "Il salvadanaio dei premi",
+     lambda r, **kw: charts.fig_reinvestimento(r), False),
     ("heatmap", "mostra_grafici_addizionali", "Rendimenti mensili",
      lambda r, **kw: charts.fig_heatmap_mensile(r, kw.get("variante", "premi_reinvest")), True),
     ("distribuzione", "mostra_grafici_addizionali", "Distribuzione dei rendimenti",
