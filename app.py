@@ -359,6 +359,30 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
             with c4:
                 dividendo = st.number_input("Dividend yield", value=0.0, step=0.25,
                                             min_value=0.0, max_value=25.0) / 100.0
+            filtro_label = st.radio(
+                _a("Quando vendere la call"),
+                [_a("Sempre, ogni mese"),
+                 _a("Solo sotto il prezzo di carico (in perdita)"),
+                 _a("Solo sopra il prezzo di carico (in guadagno)")], index=0,
+                help=_a("Sempre: la posizione e' sempre coperta, com'e' stato finora. "
+                        "Solo sotto: finche' si e' in guadagno la posizione resta scoperta "
+                        "e si tiene tutto il rialzo, ma si torna a vendere proprio dopo una "
+                        "discesa, quindi il cap morde sul rimbalzo. Solo sopra: se la call "
+                        "viene assegnata si esce comunque in utile e nelle discese si resta "
+                        "liberi di recuperare, ma si vende nelle salite, che e' dove "
+                        "l'intrinseco costa di piu'. In entrambi i casi, alla pari si vende."))
+            filtro_call = ("sotto_carico" if "sotto" in filtro_label
+                           else "sopra_carico" if "sopra" in filtro_label else "sempre")
+            carico_label = st.radio(
+                "Prezzo di carico di riferimento",
+                ["Quote coperte dalla call", "Intera posizione (media)"], index=0,
+                disabled=(filtro_call == "sempre"),
+                help=_a("Quote coperte: il prezzo a cui sono state comprate a gennaio, fisso "
+                        "per tutto l'anno. Intera posizione: la media di tutto quello che si "
+                        "ha in mano, acquisti sui cali e premi reinvestiti compresi, che "
+                        "scende a ogni acquisto fatto piu' in basso e quindi rende piu' "
+                        "difficile trovarsi 'sotto carico'."))
+            carico_riferimento = ("medio" if "Intera" in carico_label else "coperte")
             strike_atm = st.checkbox(
                 "Strike esattamente allo spot invece che a delta target", value=False,
                 help="A delta 0.50 lo strike sta appena sopra lo spot, tanto piu' quanto "
@@ -454,6 +478,8 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
         "reinvesto_modo": reinvesto_modo,
         "btd_dd_weekly_limit": float(limite_dd),
         "btd_execution": "open" if esecuzione.startswith("Apertura") else "close",
+        "filtro_call": filtro_call,
+        "carico_riferimento": carico_riferimento,
         "strike_mode": "atm_spot" if strike_atm else "delta",
         "applica_cap": bool(applica_cap),
         "vol_model": modello_vol,
@@ -695,6 +721,19 @@ def scheda_opzione(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
             f"ogni mese.")
     )
     cash = risultato["varianti"].get("premi_cash", {}).get("metrics", {})
+
+    filtro = str(cfg.get("filtro_call", "sempre"))
+    if filtro != "sempre":
+        quota = cash.get("quota_periodi_con_call")
+        verso = "sotto" if filtro == "sotto_carico" else "sopra"
+        base = ("delle quote coperte, fissato all'apertura di gennaio"
+                if cfg.get("carico_riferimento") != "medio"
+                else "medio dell'intera posizione, che scende a ogni acquisto sui cali")
+        nota(A(
+            f"<b>La call non si vende sempre.</b> Si vende solo quando il prezzo di apertura "
+            f"sta {verso} il prezzo di carico {base}: e' successo nel "
+            f"{fmt_pct(quota, 0)} dei mesi. Negli altri la posizione resta scoperta, senza "
+            f"premio incassato e senza cap sul rialzo."))
 
     rif = riferimenti.riferimento(str(cfg.get("ticker", "")))
     verdetto = riferimenti.giudizio(cash.get("premio_pct_medio"), rif)
