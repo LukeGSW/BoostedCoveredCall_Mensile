@@ -263,6 +263,55 @@ Lo stesso vale per la variante **Reinvest**: anche li' i premi stanno in un cont
 Prima finivano nella cassa generale e riducevano di nascosto il capitale versato per i
 Buy-The-Dip — la stessa cosa che si era voluta togliere alla variante Cash.
 
+### Quando vendere la call: il filtro sul prezzo di carico
+
+Di default la call si vende ogni periodo e la posizione e' sempre coperta. Un selettore
+nella sidebar, sotto *Premio della call*, permette di venderla **solo da un lato del prezzo
+di carico**:
+
+| | Quando si vende | L'idea | Il rovescio |
+|---|---|---|---|
+| **Sempre** (default) | ogni periodo | massimo premio incassato | si cede tutto il rialzo, sempre |
+| **Solo sotto il carico** | quando si e' in perdita | finche' si guadagna la posizione resta scoperta e si tiene tutto il rialzo | la condizione arriva DOPO una discesa: si vende proprio quando potrebbe partire il rimbalzo, e il cap morde sul recupero |
+| **Solo sopra il carico** | quando si e' in guadagno | se la call viene assegnata si esce comunque in utile, e nelle discese si resta liberi di recuperare | si vende nelle salite, che e' dove l'intrinseco costa di piu' |
+
+Alla pari si vende in entrambi i casi: a prezzo di carico non si e' ne' in guadagno ne' in
+perdita. Ne segue che a gennaio la call si vende sempre, perche' il prezzo di carico e'
+appena stato fissato dall'acquisto.
+
+Il **prezzo di carico** si puo' leggere in due modi, e il secondo selettore sceglie:
+
+- **Quote coperte dalla call**: il prezzo a cui sono state comprate all'apertura di gennaio,
+  fisso per tutto l'anno. E' il carico di cio' che la call effettivamente copre.
+- **Intera posizione**: la media di tutto quello che si ha in mano, acquisti sui cali e
+  premi reinvestiti compresi. Scende a ogni acquisto fatto piu' in basso, quindi rende piu'
+  difficile trovarsi "sotto carico" e piu' facile trovarsi "sopra".
+
+Nei periodi senza call non c'e' premio, non c'e' strike e non si paga intrinseco: la colonna
+`call_venduta` dice quali sono, e il grafico *Prezzo del sottostante e strike* disegna la
+linea del carico e segna i periodi lasciati scoperti.
+
+**Cosa dicono i numeri.** Sweep su otto percorsi sintetici da dieci anni (rialzi tranquilli
+e volatili, laterale, ribassi, crypto, crisi e recupero), variante Premi (Cash), rispetto a
+vendere sempre:
+
+| | Rendimento medio | Percorsi migliorati | Drawdown vero |
+|---|---|---|---|
+| Solo sotto il carico | **+11,8%** | 5 su 8 | +2,4 punti piu' profondo |
+| Solo sopra il carico | +1,9% | **8 su 8** | +1,8 punti piu' profondo |
+
+Due letture opposte. *Solo sotto* ha il guadagno medio piu' alto, ma la media e' trascinata
+da un percorso solo: sul sottostante tipo crypto porta il rendimento da 57% a 132% l'anno,
+mentre nei due percorsi in ribasso peggiora. E' una scommessa sul trend, non un
+miglioramento. *Solo sopra* guadagna molto meno in media ma **migliora tutti e otto i
+percorsi**, ed e' quello che salva di piu' i ribassi: sul percorso "ribasso" porta il
+rendimento da −3,67% a −0,66%.
+
+Entrambi peggiorano il drawdown, ed e' logico: si passa una parte del tempo senza il
+cuscinetto del premio. Chi cerca la riduzione del drawdown non ha motivo di attivarli.
+
+Sono risultati su percorsi sintetici: il verdetto vero si misura sul proprio sottostante.
+
 ### Quando i premi tornano al lavoro
 
 Solo per la variante **Reinvest**, e scelto da un selettore nella sidebar sotto *Buy-The-Dip*:
@@ -681,6 +730,11 @@ kq_btd_cc/
 
 ## Cosa e' cambiato rispetto alla versione precedente
 
+- La call si puo' vendere **solo da un lato del prezzo di carico**: solo in perdita, per
+  tenere tutto il rialzo finche' si guadagna, oppure solo in guadagno, per uscire in utile
+  se assegnati e restare liberi di recuperare nelle discese. Su otto percorsi sintetici la
+  seconda migliora il rendimento su tutti e otto, la prima ha la media piu' alta ma perde
+  nei ribassi.
 - Nella variante Reinvest si puo' scegliere **quando** i premi tornano al lavoro: subito
   alla chiusura del periodo, oppure fermi in un salvadanaio finche' non scatta un acquisto
   sui cali, per rientrare **al lordo** e allo stesso prezzo del BTD, con l'intrinseco pagato
