@@ -48,6 +48,11 @@ DIZIONARIO_CAMPI: Dict[str, str] = {
     "sigma_implicita": "Volatilita' usata per prezzare la call (realizzata x VRP)",
     "vrp_applicato": "VRP effettivo del mese, funzione del livello di volatilita'",
     "strike": "Strike della call venduta (delta 0.50 o ATM secondo configurazione)",
+    "call_venduta": "True se in questo periodo la call e' stata effettivamente venduta",
+    "prezzo_carico": "Prezzo di carico usato dal filtro sulla vendita della call",
+    "carico_coperte": "Prezzo a cui sono state comprate le quote coperte, fisso da gennaio",
+    "carico_medio": "Prezzo medio di carico dell'intera posizione, BTD e reinvestimenti inclusi",
+    "scarto_dal_carico": "Quanto l'apertura sta sopra (+) o sotto (-) il prezzo di carico",
     "premio_pct": "Premio incassato in frazione del prezzo del sottostante",
     "premio": "Premio incassato in valuta (quote coperte x open x premio_pct)",
     "intrinseco_pagato": "Valore intrinseco pagato a scadenza se la call e' in-the-money",
@@ -186,6 +191,15 @@ def build_export(
                     "versamenti_cum traccia il denaro entrato dall'esterno; "
                     "pnl_netto = valore_portafoglio - versamenti_cum."
                 ),
+                "filtro_call": (
+                    "Con filtro_call='sempre' la call si vende ogni periodo. Con "
+                    "'sotto_carico' solo quando l'apertura non supera il prezzo di carico "
+                    "(si e' in perdita), con 'sopra_carico' solo quando non ne sta sotto "
+                    "(si e' in guadagno); alla pari si vende in entrambi i casi. Il "
+                    "riferimento e' carico_riferimento='coperte' (l'apertura di gennaio, "
+                    "fissa per l'anno) oppure 'medio' (l'intera posizione, acquisti sui cali "
+                    "e premi reinvestiti compresi). Nei periodi senza call non c'e' premio, "
+                    "ne' strike, ne' intrinseco: la colonna call_venduta dice quali sono."),
                 "reinvestimento": (
                     "Solo variante Reinvest. Con reinvesto_modo='subito' il risultato netto "
                     "delle opzioni compra quote alla chiusura di ogni periodo. Con 'al_btd' "
