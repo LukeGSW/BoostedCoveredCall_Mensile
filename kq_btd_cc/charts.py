@@ -1048,6 +1048,23 @@ def fig_prezzo_strike(risultato: Dict[str, Any], chiave: str = "premi_cash") -> 
     fig.add_trace(go.Scatter(x=df.index, y=df["strike"], name="Strike della call venduta",
                              line=dict(color=PALETTE["strike"], width=1.5, dash="dot"),
                              hovertemplate="Strike: <b>%{y:,.2f}</b><extra></extra>"))
+    # Quando il filtro sul prezzo di carico e' attivo, il prezzo di riferimento e
+    # i periodi lasciati scoperti sono la cosa piu' importante del grafico.
+    filtro = str((risultato.get("config") or {}).get("filtro_call", "sempre"))
+    if filtro != "sempre" and "prezzo_carico" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df["prezzo_carico"].values, name="Prezzo di carico",
+            line=dict(color=PALETTE["btd"], width=1.4, shape="hv"),
+            hovertemplate="Carico: <b>%{y:,.2f}</b><extra></extra>"))
+        scoperti = df[~df["call_venduta"].astype(bool)]
+        if not scoperti.empty:
+            fig.add_trace(go.Scatter(
+                x=scoperti.index, y=scoperti["close"].values,
+                name="Nessuna call venduta", mode="markers",
+                marker=dict(color=PALETTE["premio"], size=7, symbol="circle-open",
+                            line=dict(width=1.6)),
+                hovertemplate="Posizione scoperta<extra></extra>"))
+
     itm = df[df["intrinseco_pagato"] > 0]
     if not itm.empty:
         fig.add_trace(go.Scatter(
@@ -1060,9 +1077,17 @@ def fig_prezzo_strike(risultato: Dict[str, Any], chiave: str = "premi_cash") -> 
     fig.update_yaxes(title_text="Prezzo")
     _asse_tempo(fig)
     n_itm, n = len(itm), len(df)
+    venduti = int(df["call_venduta"].sum()) if "call_venduta" in df.columns else n
+    coda = ""
+    if filtro != "sempre":
+        verso = "sotto" if filtro == "sotto_carico" else "sopra"
+        coda = (f" La call si vende solo quando il prezzo sta {verso} il carico: e' successo "
+                f"in {venduti} mesi su {n} ({venduti / n:.0%}), negli altri la posizione e' "
+                f"rimasta scoperta.")
     return _layout(fig, "Prezzo del sottostante e strike venduto",
-                   f"Call finita in-the-money in {n_itm} mesi su {n} ({n_itm / n:.0%}). "
-                   f"A delta 0.50 lo strike sta appena sopra il prezzo di apertura.",
+                   f"Call finita in-the-money in {n_itm} mesi su {max(venduti, 1)} vendute "
+                   f"({n_itm / max(venduti, 1):.0%}). A delta 0.50 lo strike sta appena sopra "
+                   f"il prezzo di apertura." + coda,
                    altezza=440, cad=_cadenza(risultato))
 
 
