@@ -50,6 +50,23 @@ Contabilita': due grandezze diverse, da non confondere.
     Questo SI azzera a ogni gennaio, insieme a tutto il resto.
 I rendimenti sono time-weighted, quindi ripuliti dai flussi.
 
+QUANDO SI VENDE LA CALL. Con `filtro_call="sempre"` ogni periodo, come sempre. Altrimenti si vende solo
+quando il prezzo di apertura sta dalla parte giusta del prezzo di carico:
+
+  * "sotto_carico"  solo in perdita. Finche' si e' in guadagno la posizione resta
+                    scoperta e si tiene tutto il rialzo. Il rovescio e' che la
+                    condizione arriva DOPO una discesa, quindi si vende proprio
+                    quando potrebbe partire il rimbalzo, e il cap morde sul recupero.
+  * "sopra_carico"  solo in guadagno. Se la call viene assegnata si esce comunque
+                    in utile, e nelle discese si resta liberi di recuperare senza
+                    cap. Il rovescio e' che si vende nelle salite, che e' esattamente
+                    dove l'intrinseco costa di piu'.
+
+Il prezzo di carico e' quello delle sole quote coperte (l'apertura di gennaio,
+fissa per tutto l'anno) oppure quello medio dell'intera posizione, acquisti sui
+cali e premi reinvestiti compresi, che scende a ogni acquisto fatto piu' in basso.
+Quale combinazione paghi lo dice solo il backtest, e cambia col sottostante.
+
 QUANDO SI REINVESTONO I PREMI (solo variante Reinvest). Due modi, scelti da
 `reinvesto_modo`:
   * "subito"  ogni periodo, alla chiusura, si comprano quote con il risultato
@@ -160,6 +177,23 @@ class BacktestConfig:
     # prossimo acquisto sui cali, allo stesso prezzo. Sulle altre due varianti
     # non ha alcun effetto: una non vende call, l'altra tiene i premi in cassa.
     reinvesto_modo: str = "subito"             # "subito" | "al_btd"
+
+    # Quando vendere la call, in funzione del prezzo di carico.
+    #   "sempre"        ogni periodo (comportamento storico)
+    #   "sotto_carico"  solo in perdita: finche' si e' in guadagno la posizione
+    #                   resta scoperta e si tiene tutto il rialzo
+    #   "sopra_carico"  solo in guadagno: se la call viene assegnata si esce in
+    #                   utile, e nelle discese si resta liberi di recuperare
+    # Alla pari si vende in entrambi i casi: a prezzo di carico non si e' ne'
+    # in guadagno ne' in perdita.
+    filtro_call: str = "sempre"
+
+    # Quale prezzo di carico guardare.
+    #   "coperte"  il prezzo a cui sono state comprate le quote coperte dalla
+    #              call, cioe' l'apertura di gennaio, fisso per tutto l'anno
+    #   "medio"    il prezzo medio dell'intera posizione, acquisti sui cali e
+    #              premi reinvestiti compresi: scende a ogni acquisto piu' in basso
+    carico_riferimento: str = "coperte"
 
     # Opzione
     strike_mode: str = "delta"                 # "delta" (0.50) | "atm_spot"
@@ -332,6 +366,8 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
     vende_call = bool(spec["vende_call"])
     reinveste = bool(spec["reinveste"])
     reinvesto_al_btd = reinveste and str(cfg.reinvesto_modo) == "al_btd"
+    filtro_call = str(cfg.filtro_call)
+    carico_su_medio = str(cfg.carico_riferimento) == "medio"
     usa_btd = bool(spec.get("usa_btd", True))
     # I premi incassati restano in un conto a parte e NON finanziano gli acquisti
     # sui cali: quelli si pagano con capitale proprio. E' denaro che arriva dal
@@ -371,6 +407,10 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
     # tiene onesto. Il denaro sta in `cassa_opzioni`, qui c'e' solo il conto.
     premi_pendenti = 0.0
     premi_investiti = 0.0
+    # Prezzo di carico, nelle due letture. Quello delle quote coperte e' fisso da
+    # gennaio a dicembre; quello medio scende a ogni acquisto fatto piu' in basso.
+    carico_coperte = np.nan
+    costo_posizione = 0.0
     quote_coperte = 0.0
     quote_extra = 0.0
     versamenti = 0.0
@@ -431,6 +471,9 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
             btd_usato_anno = 0.0
             # Il salvadanaio e' stato liquidato insieme a tutto il resto.
             premi_pendenti = 0.0
+            # Nuovo prezzo di carico: si e' ricomprato tutto all'apertura.
+            carico_coperte = O
+            costo_posizione = capitale_annuo
             anno_corrente = data.year
 
         # Interessi sulla liquidita'. Il saldo puo' andare a debito quando il
@@ -452,7 +495,22 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
         premio = 0.0
         vrp_applicato = np.nan
 
-        if vende_call and quote_coperte > 0 and np.isfinite(sigma) and sigma > 0:
+        # Il prezzo di carico e' noto prima di agire: le quote coperte si sono
+        # comprate a gennaio, gli acquisti sui cali sono tutti gia' avvenuti nei
+        # periodi precedenti. Nessuno sguardo in avanti.
+        quote_totali = quote_coperte + quote_extra
+        carico_medio = (costo_posizione / quote_totali if quote_totali > 0 else np.nan)
+        carico = (carico_medio if carico_su_medio else carico_coperte)
+        if filtro_call == "sotto_carico":
+            # in perdita, o esattamente a pari
+            call_venduta = bool(np.isfinite(carico) and O <= carico * (1.0 + 1e-12))
+        elif filtro_call == "sopra_carico":
+            # in guadagno, o esattamente a pari
+            call_venduta = bool(np.isfinite(carico) and O >= carico * (1.0 - 1e-12))
+        else:
+            call_venduta = True
+
+        if vende_call and call_venduta and quote_coperte > 0 and np.isfinite(sigma) and sigma > 0:
             q = pm.quote(O, sigma, T)
             strike, premio_pct, vrp_applicato = q["strike"], q["premium_pct"], q["vrp"]
             if cfg.strike_mode == "atm_spot":
@@ -523,6 +581,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
                 cassa -= btd_importo
                 quote_extra += btd_importo / prezzo_btd
                 btd_usato_anno += btd_importo
+                costo_posizione += btd_importo
             else:
                 btd_importo = quota_calo = quota_boost = 0.0
 
@@ -544,6 +603,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
             if arretrati > 1e-9 and prezzo_btd > 0:
                 cassa_opzioni -= arretrati
                 quote_extra += arretrati / prezzo_btd
+                costo_posizione += arretrati
                 premi_pendenti -= arretrati
                 premi_investiti += arretrati
                 reinvestito_btd = arretrati
@@ -574,6 +634,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
                 else:
                     cassa -= reinvestito_chiusura
                 quote_extra += reinvestito_chiusura / C
+                costo_posizione += reinvestito_chiusura
                 premi_investiti += reinvestito_chiusura
         reinvestito = reinvestito_btd + reinvestito_chiusura
 
@@ -597,6 +658,13 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
             "sigma_implicita": float(pm.implied_sigma(sigma)) if np.isfinite(sigma) else np.nan,
             "vrp_applicato": float(vrp_applicato) if np.isfinite(vrp_applicato) else np.nan,
             "strike": float(strike) if np.isfinite(strike) else np.nan,
+            "call_venduta": bool(vende_call and call_venduta and quote_coperte > 0
+                                 and np.isfinite(strike)),
+            "prezzo_carico": float(carico) if np.isfinite(carico) else np.nan,
+            "scarto_dal_carico": (float(O / carico - 1.0)
+                                  if (np.isfinite(carico) and carico > 0) else np.nan),
+            "carico_coperte": float(carico_coperte) if np.isfinite(carico_coperte) else np.nan,
+            "carico_medio": float(carico_medio) if np.isfinite(carico_medio) else np.nan,
             "premio_pct": premio_pct, "premio": premio,
             "intrinseco_pagato": intrinseco, "netto_opzione": netto_opzione,
             "reinvestito": reinvestito,
