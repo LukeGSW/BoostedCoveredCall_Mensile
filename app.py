@@ -256,6 +256,16 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                      "Con la crescita gli utili tornano al lavoro, mantenendo la proporzione "
                      "fra parte coperta e parte scoperta, e non servono nuovi versamenti.")
             capitale_modo = ("fisso" if modo_label.startswith("Sempre") else "composto")
+            cashout = st.checkbox(
+                "Prelevare tutto a fine anno (ciclo chiuso)", value=False,
+                help="Il reset di dicembre diventa un cashout totale: esce tutto, "
+                     "liquidazione e cassa, e a gennaio rientra solo il capitale fisso. "
+                     "Da accendere se la strategia ti serve per fare cassa ogni anno. "
+                     "Senza, l'eccedenza resta sul conto e matura la remunerazione della "
+                     "liquidita' qui sotto, gonfiando il risultato con gli interessi su "
+                     "denaro che ti saresti gia' portato a casa. Non si combina col "
+                     "capitale crescente: se porti via tutto non resta nulla da "
+                     "capitalizzare.")
             riserva = st.slider(
                 "Riserva liquida per gli acquisti sui cali", 0, 200, 75, 5,
                 disabled=(capitale_modo == "fisso"),
@@ -473,6 +483,7 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
         "capitale_iniziale": float(capitale),
         "capitale_addizionale": float(capitale_add),
         "capitale_modo": capitale_modo,
+        "cashout_annuale": bool(cashout),
         "riserva_btd_pct": float(riserva),
         "boost_pct": float(boost),
         "reinvesto_modo": reinvesto_modo,
@@ -752,6 +763,36 @@ def scheda_opzione(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
             f"Se preferisci evitarlo, tieni i premi in cassa invece di reinvestirli, "
             f"oppure vendi la call a un delta piu' basso."
         )
+    if cfg.get("cashout_annuale"):
+        y = risultato["varianti"]["premi_cash"]["yearly"]
+        e = y["risultato_anno"]
+        yb = (risultato.get("benchmark") or {}).get("yearly")
+        confronto = ""
+        if isinstance(yb, pd.DataFrame) and not yb.empty:
+            eb = yb["risultato_anno"].reindex(y.index)
+            confronto = (f" Col solo sottostante sarebbe stata "
+                         f"{fmt_currency_compact(eb.median())} di mediana e "
+                         f"{fmt_currency_compact(eb.min())} nell'anno peggiore.")
+        nota(
+            f"<b>Ciclo chiuso.</b> Ogni dicembre esce tutto e ogni gennaio rientra solo il "
+            f"capitale fisso, quindi la liquidita' non si accumula e non matura interessi. "
+            f"In {len(e)} cicli hai portato a casa {fmt_currency_compact(e.median())} di "
+            f"mediana, {int((e > 0).sum())} anni in utile, anno peggiore "
+            f"{fmt_currency_compact(e.min())}." + confronto)
+    else:
+        interessi = cash.get("interessi_netti") or 0.0
+        utile = cash.get("pnl_netto") or 0.0
+        if utile > 0 and interessi / utile > 0.10:
+            st.warning(
+                f"**Il {fmt_pct(interessi / utile, 0)} dell'utile sono interessi sulla "
+                f"liquidita' ferma** ({fmt_currency_compact(interessi)} su "
+                f"{fmt_currency_compact(utile)}). Il reset di dicembre non preleva nulla: "
+                f"l'eccedenza resta sul conto e continua a fruttare. Se la strategia ti "
+                f"serve per fare cassa ogni anno quel denaro l'avresti gia' ritirato, e "
+                f"quegli interessi non li avresti. Accendi *Prelevare tutto a fine anno* "
+                f"nella sidebar, sotto Capitale, per vedere i numeri veri."
+            )
+
     st.markdown("#### Da dove viene il risultato")
     kpi_cards([
         ("Movimento delle quote", fmt_currency_compact(cash.get("contributo_prezzo")),
