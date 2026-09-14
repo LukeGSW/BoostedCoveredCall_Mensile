@@ -87,6 +87,8 @@ CATALOGO: List[Tuple[str, str, str, Callable[[Dict[str, Any]], Any], bool]] = [
      lambda r, **kw: charts.fig_dd_settimanale(r), False),
     ("rendimenti_annuali", "mostra_grafico_rend_annuali", "Rendimenti annuali operativi",
      lambda r, **kw: charts.fig_rendimenti_annuali(r), False),
+    ("cassa_annuale", "mostra_grafico_rend_annuali", "La cassa di ogni anno",
+     lambda r, **kw: charts.fig_cassa_annuale(r, kw.get("variante", "premi_cash")), False),
     ("composizione_annuale", "mostra_grafico_composizione", "Composizione del risultato annuale",
      lambda r, **kw: charts.fig_composizione_annuale(r, kw.get("variante", "premi_cash")), False),
     ("premio", "mostra_grafico_premio", "Premio stimato e volatilita",
