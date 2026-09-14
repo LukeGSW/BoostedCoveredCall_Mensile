@@ -1335,3 +1335,53 @@ def fig_reinvestimento(risultato: Dict[str, Any]) -> go.Figure:
                "quasi sempre vuoto. Prova la modalita' differita nella sidebar per "
                "comprarli sui ribassi.")
     return _layout(fig, "Il salvadanaio dei premi", sub, altezza=560, cad=cad)
+
+
+# ============================================================================
+# 20. La cassa che si porta a casa ogni anno
+# ============================================================================
+def fig_cassa_annuale(risultato: Dict[str, Any], chiave: str = "premi_cash") -> go.Figure:
+    """Quanto rende il ciclo annuale, anno per anno, contro il solo sottostante.
+
+    E' la lettura della strategia come fonte di reddito: ogni barra e' quello che
+    il ciclo ha prodotto in quell'anno, non un rendimento composto.
+    """
+    res = risultato.get("varianti", {}).get(chiave)
+    bm = _benchmark(risultato)
+    if not res or not isinstance(res.get("yearly"), pd.DataFrame) or res["yearly"].empty:
+        return _vuoto("Nessun dato disponibile")
+    y = res["yearly"]
+    anni = [str(a) for a in y.index]
+    colore = COLORE_VARIANTE.get(chiave, PALETTE["text"])
+
+    fig = go.Figure()
+    if bm is not None and isinstance(bm.get("yearly"), pd.DataFrame) and not bm["yearly"].empty:
+        yb = bm["yearly"]["risultato_anno"].reindex(y.index)
+        fig.add_trace(go.Bar(
+            x=anni, y=yb.values, name=bm["label"],
+            marker=dict(color=COLORE_BENCHMARK, opacity=0.55),
+            hovertemplate="%{fullData.name}<br>%{x}: <b>$%{y:,.0f}</b><extra></extra>"))
+    fig.add_trace(go.Bar(
+        x=anni, y=y["risultato_anno"].values, name=res["label"],
+        marker=dict(color=colore),
+        hovertemplate="%{fullData.name}<br>%{x}: <b>$%{y:,.0f}</b><extra></extra>"))
+
+    fig.add_hline(y=0, line=dict(color=PALETTE["axis"], width=1.2))
+    mediana = float(y["risultato_anno"].median())
+    fig.add_hline(y=mediana, line=dict(color=colore, width=1.1, dash="dot"),
+                  annotation_text=f"mediana {mediana:,.0f}", annotation_position="top left",
+                  annotation_font=dict(color=colore, size=11, family=FONT_MONO))
+    fig.update_layout(barmode="group", bargap=0.24, bargroupgap=0.06)
+    fig.update_yaxes(tickprefix="$", title_text="Cassa dell'anno")
+    fig.update_xaxes(showgrid=False, title_text="")
+
+    e = y["risultato_anno"]
+    positivi = int((e > 0).sum())
+    cashout = bool((risultato.get("config") or {}).get("cashout_annuale"))
+    sub = (f"{positivi} anni in utile su {len(e)}, mediana {e.median():,.0f}, "
+           f"anno peggiore {e.min():,.0f}.")
+    sub += (" Il ciclo si chiude davvero: a dicembre esce tutto e a gennaio rientra solo il "
+            "capitale fisso." if cashout else
+            " <b>Senza cashout</b>: l'eccedenza resta sul conto e continua a fruttare, quindi "
+            "questi importi includono anche gli interessi su denaro che avresti gia' ritirato.")
+    return _layout(fig, "La cassa di ogni anno", sub, altezza=440, cad=_cadenza(risultato))
