@@ -365,6 +365,64 @@ La scheda *Opzione e premio* ha un grafico dedicato — il salvadanaio, i rientr
 curve cumulate di quanto le opzioni hanno prodotto e quanto e' tornato al lavoro — e le
 metriche riportano attesa media, quota rientrata e premi mai reinvestiti.
 
+### Il ciclo chiuso: prelevare tutto a fine anno
+
+C'e' un modo di leggere questa strategia che cambia i numeri piu' di qualunque parametro:
+non come un investimento che cresce, ma come una **macchina che ogni anno produce cassa**.
+Metti dentro il capitale a gennaio, a dicembre liquidi, ti porti via tutto, e l'anno dopo
+ricominci uguale.
+
+Se e' cosi' che la usi, la casella **Prelevare tutto a fine anno** nella sidebar, sotto
+*Capitale*, va accesa — e non e' un dettaglio estetico. Con il cashout spento l'eccedenza
+resta sul conto e matura la remunerazione della liquidita', anno dopo anno, su denaro che
+tu ti saresti gia' portato a casa. Su SPY dal 2010, con 70.000 di capitale fisso e la cassa
+al 3%:
+
+| | Senza cashout | **Con cashout** |
+|---|---|---|
+| Utile dichiarato | 266.119 | **201.570** |
+| di cui interessi sulla liquidita' | 64.124 (**24%**) | −425 |
+| Rendimento medio annuo | 19,52% | **14,91%** |
+| Benchmark, stesso conto | 18,10% | **14,40%** |
+
+Un quarto dell'utile erano interessi su soldi che non avresti mai avuto sul conto. La
+differenza fra le due colonne e' **interamente** quella voce: la strategia in se' non
+cambia di un centesimo, cambia solo cosa le si attribuisce. La dashboard lo dice da sola,
+con un avviso in cima alla scheda *Opzione e premio* quando gli interessi superano il 10%
+dell'utile.
+
+Con il cashout acceso il quadro resta favorevole, ma sui numeri veri:
+
+| | Buy & Hold | **Premi (Cash)** |
+|---|---|---|
+| Cassa mediana annua | 9.873 | **14.878** |
+| Cassa media annua | 10.082 | **11.857** |
+| Anno peggiore | −12.884 | **−10.598** |
+| Anni in utile | 15/17 | 15/17 |
+| Oscillazione dei rendimenti | 13,5% | **10,5%** |
+| Drawdown vero | −16,3% | **−9,6%** |
+
+Il vantaggio sul rendimento scende da +1,42 a **+0,51 punti**: buona parte di quello che
+sembrava merito della strategia era solo il fatto che accumulava piu' liquidita' e quindi
+incassava piu' interessi. Quello che resta e' la regolarita': mediana piu' alta della meta',
+anno peggiore meno pesante di 2.286, oscillazione di tre punti inferiore.
+
+**Come funziona dentro.** Il prelievo e' registrato come versamento **negativo**, quindi
+`pnl_netto` e il rendimento time-weighted continuano a tornare da soli e il grafico della
+cassa annuale legge direttamente `risultato_anno`. `versamenti_cum` puo' diventare negativo
+— hai ritirato piu' di quanto hai messo — e per questo il ROI usa `versamenti_lordi`, cioe'
+la somma dei soli flussi in entrata. Il Buy & Hold a parita' di flussi subisce lo stesso
+prelievo, altrimenti riceverebbe capitale fresco ogni gennaio senza mai restituirne.
+
+Due conseguenze da conoscere:
+
+- **Prelevare tutto e capitalizzare gli utili sono incompatibili.** Se porti via tutto non
+  resta nulla da far crescere: col cashout acceso il capitale di gennaio torna a essere
+  quello fisso, qualunque cosa dica il selettore del capitale crescente.
+- **La cassa operativa resta a zero**, quindi ogni acquisto sui cali richiede denaro fresco
+  e i versamenti lordi salgono parecchio. Il rendimento non ne risente, perche' e' misurato
+  sul capitale impiegato nel ciclo e quello non cambia.
+
 ### Il vero freno: meta' del conto sta ferma
 
 Il reset annuale reimpiega solo il capitale fisso e lascia in cassa tutti i profitti
@@ -730,6 +788,10 @@ kq_btd_cc/
 
 ## Cosa e' cambiato rispetto alla versione precedente
 
+- Il reset di dicembre puo' essere un **cashout totale**: esce tutto, a gennaio rientra
+  solo il capitale fisso. Senza, la liquidita' si accumula e matura interessi che su SPY
+  dal 2010 valevano il 24% dell'utile dichiarato, su denaro gia' ritirato. E' la lettura da
+  usare se la strategia serve a fare cassa ogni anno.
 - La call si puo' vendere **solo da un lato del prezzo di carico**: solo in perdita, per
   tenere tutto il rialzo finche' si guadagna, oppure solo in guadagno, per uscire in utile
   se assegnati e restare liberi di recuperare nelle discese. Su otto percorsi sintetici la
