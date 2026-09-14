@@ -169,6 +169,11 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99,
 
     valore_fin = float(df["valore_portafoglio"].iloc[-1])
     versamenti = float(df["versamenti_cum"].iloc[-1])
+    # Con il cashout annuale i versamenti netti possono diventare negativi: hai
+    # ritirato piu' di quanto hai messo. Per il ROI serve il denaro davvero
+    # tirato fuori, cioe' la somma dei soli flussi in entrata.
+    versati_lordi = float(df.loc[df["versamento_mese"] > 0, "versamento_mese"].sum())
+    prelievi = float(df["prelievo"].sum()) if "prelievo" in df.columns else 0.0
     pnl = valore_fin - versamenti
     capitale_impiegato = (df["quote_coperte"] + df["quote_extra"]) * df["close"]
 
@@ -200,7 +205,11 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99,
         "valore_finale": _f(valore_fin),
         "versamenti_totali": _f(versamenti),
         "pnl_netto": _f(pnl),
-        "roi_su_versamenti": _f(pnl / versamenti) if versamenti else None,
+        "roi_su_versamenti": _f(pnl / versati_lordi) if versati_lordi else None,
+        "versamenti_lordi": _f(versati_lordi),
+        "prelievi_totali": _f(prelievi),
+        "cicli_con_prelievo": (int((df["prelievo"] > 0).sum())
+                               if "prelievo" in df.columns else 0),
         "capitale_medio_impiegato": _f(capitale_impiegato.mean()),
         "capitale_max_impiegato": _f(capitale_impiegato.max()),
         **_capitale_al_lavoro(df, capitale_impiegato, pnl),
@@ -384,7 +393,8 @@ def metrics_table(risultati: Dict[str, Any]) -> pd.DataFrame:
     if not righe:
         return pd.DataFrame()
     ordine = [
-        "valore_finale", "versamenti_totali", "pnl_netto", "roi_su_versamenti",
+        "valore_finale", "versamenti_totali", "versamenti_lordi", "prelievi_totali",
+        "cicli_con_prelievo", "pnl_netto", "roi_su_versamenti",
         "rendimento_medio", "rendimento_mediano", "rendimento_volatilita",
         "rendimento_su_rischio", "rendimento_su_drawdown",
         "anni_positivi", "anni_totali", "miglior_anno", "peggior_anno",
@@ -418,7 +428,10 @@ def metrics_table(risultati: Dict[str, Any]) -> pd.DataFrame:
 
 ETICHETTE = {
     "valore_finale": "Valore finale conto",
-    "versamenti_totali": "Capitale versato (totale)",
+    "versamenti_totali": "Capitale versato, al netto dei prelievi",
+    "versamenti_lordi": "Capitale versato (somma di tutte le entrate)",
+    "prelievi_totali": "Denaro ritirato col cashout di fine anno",
+    "cicli_con_prelievo": "Numero di cashout di fine anno",
     "pnl_netto": "Utile netto dei versamenti",
     "roi_su_versamenti": "ROI sul capitale versato",
     "max_dd_giornaliero_pct": "Max drawdown VERO (%) — valorizzato ogni giorno",
@@ -507,6 +520,7 @@ FORMATI = {
     "dd_giornaliero_durata_max": "int", "giorni": "int",
     "reinvestimenti_numero": "int", "attesa_media_periodi": "num",
     "mesi_con_call": "int", "quota_periodi_con_call": "pct",
+    "cicli_con_prelievo": "int",
     "quota_premi_reinvestiti": "pct",
     "rendimento_medio": "pct", "rendimento_mediano": "pct",
     "rendimento_volatilita": "pct", "miglior_anno": "pct", "peggior_anno": "pct",
