@@ -72,6 +72,7 @@ DIZIONARIO_CAMPI: Dict[str, str] = {
                      "finanzia gli acquisti sui cali, che si pagano con capitale proprio",
     "interessi": "Interessi del mese: attivi sulla cassa positiva, passivi sul saldo a debito",
     "liquidazione": "Controvalore liquidato al reset di inizio anno",
+    "prelievo": "Denaro uscito dal conto al cashout di fine anno (0 se il cashout e' spento)",
     "valore_portafoglio": "Valore totale del conto: quote a mercato piu' cassa",
     "versamento_mese": "Denaro entrato dall'esterno in questo mese",
     "versamenti_cum": "Denaro entrato dall'esterno dall'inizio del backtest; non si azzera "
@@ -187,6 +188,16 @@ def build_export(
                     "Il premio e' una percentuale del prezzo corrente del sottostante, "
                     "quindi l'incasso in valuta cambia ogni mese."
                 ),
+                "cashout": (
+                    "Con cashout_annuale=true il reset e' un ciclo chiuso: a dicembre esce "
+                    "tutto (liquidazione piu' cassa) e a gennaio rientra solo il capitale "
+                    "fisso. Il prelievo e' registrato come versamento negativo, quindi "
+                    "versamenti_cum puo' diventare negativo e pnl_netto resta corretto; per "
+                    "il ROI si usa versamenti_lordi, la somma dei soli flussi in entrata. "
+                    "Con il cashout spento l'eccedenza resta sul conto e matura "
+                    "idle_cash_rate: su orizzonti lunghi quegli interessi possono valere un "
+                    "quarto dell'utile dichiarato, su denaro che chi preleva ogni anno non "
+                    "avrebbe mai avuto sul conto."),
                 "contabilita": (
                     "versamenti_cum traccia il denaro entrato dall'esterno; "
                     "pnl_netto = valore_portafoglio - versamenti_cum."
