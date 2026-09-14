@@ -33,6 +33,15 @@ Modello (una riga = un periodo, mese o settimana):
     resta li' per tutto l'anno. La call venduta NON lo cappa, quindi si tiene
     tutto il rialzo. Sul capitale fisso si incassa il premio e si paga il cap;
     su questo no.
+  * Con `cashout_annuale=True` il reset e' un ciclo CHIUSO: a dicembre esce
+    tutto, liquidazione e cassa, e a gennaio rientra solo il capitale fisso. E'
+    la lettura giusta per chi usa la strategia per fare cassa ogni anno, ed e'
+    anche l'unica onesta in quel caso: senza il prelievo la liquidita' resta sul
+    conto, matura interessi e gonfia il risultato di soldi che in realta' ti sei
+    gia' portato via. Il prelievo e' registrato come versamento NEGATIVO, cosi'
+    l'utile netto e il rendimento time-weighted continuano a tornare da soli.
+    Prelevare tutto e capitalizzare gli utili sono incompatibili: se il cashout
+    e' acceso il capitale di gennaio torna per forza a essere quello fisso.
   * A fine anno si liquida tutto e si ricomincia. Con `capitale_modo="fisso"`
     si rimette al lavoro sempre lo stesso importo e l'eccedenza resta in cassa:
     la strategia non compone, e il conto cresce in linea retta perche' il
@@ -147,6 +156,14 @@ class BacktestConfig:
     #              proporzione fra parte coperta e parte scoperta: i profitti
     #              tornano al lavoro e il rendimento si capitalizza.
     capitale_modo: str = "fisso"
+
+    # Cosa succede all'eccedenza al reset di gennaio.
+    #   False  resta sul conto come liquidita', e frutta `idle_cash_rate`
+    #   True   esce tutta: il ciclo annuale si chiude davvero, a gennaio rientra
+    #          solo il capitale fisso. Da accendere se la strategia serve a fare
+    #          cassa ogni anno, altrimenti il backtest conta come rendimento
+    #          anche gli interessi su denaro che ti saresti gia' portato a casa.
+    cashout_annuale: bool = False
 
     # Solo in modalita' composta: quota del conto tenuta liquida a gennaio per
     # finanziare gli acquisti sui cali durante l'anno, espressa in frazione del
@@ -383,7 +400,11 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
     cap0_base = float(cfg.capitale_iniziale)
     cap_add_base = float(cfg.capitale_addizionale)
     capitale_base = cap0_base + cap_add_base
-    componi = str(cfg.capitale_modo) == "composto"
+    cashout = bool(cfg.cashout_annuale)
+    # Portare via tutto e capitalizzare sono la stessa cassa contesa da due usi:
+    # se si preleva non resta nulla da far crescere, e il capitale di gennaio
+    # torna a essere quello fisso.
+    componi = str(cfg.capitale_modo) == "composto" and not cashout
     # Valori dell'anno in corso: identici alla base in modalita' fissa, scalati
     # sul conto disponibile in modalita' composta.
     cap0 = cap0_base
@@ -432,6 +453,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
         ms = _inizio_periodo(data, cadenza)
         versato_mese = 0.0
         liquidazione = 0.0
+        prelievo = 0.0
         nuovo_anno = (anno_corrente is None) or (data.year != anno_corrente)
 
         # ---------------- Reset annuale ----------------
@@ -443,6 +465,19 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
                 cassa += liquidazione + cassa_opzioni
                 cassa_opzioni = 0.0
                 quote_coperte = quote_extra = 0.0
+                if cashout:
+                    # Esce tutto. Un saldo negativo significa che il conto era a
+                    # debito: allora non si preleva, si ripiana, ed e' denaro che
+                    # entra. Il segno se ne occupa da solo.
+                    prelievo = cassa
+                    versamenti -= prelievo
+                    versato_mese -= prelievo
+                    cassa = 0.0
+                    # Il Buy & Hold a parita' di flussi deve subire lo stesso
+                    # prelievo, altrimenti riceve ogni gennaio capitale fresco
+                    # senza mai restituirne e diventa incommentabile.
+                    if prezzo_liq > 0:
+                        bh_quote = max(0.0, bh_quote - prelievo / prezzo_liq)
             # Quanto rimettere al lavoro quest'anno
             if componi and cassa > 0:
                 # Una parte resta liquida per comprare sui cali durante l'anno.
@@ -678,6 +713,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
             "quote_coperte": quote_coperte, "quote_extra": quote_extra,
             "cassa": cassa + cassa_opzioni, "cassa_opzioni": cassa_opzioni,
             "interessi": interessi, "liquidazione": liquidazione,
+            "prelievo": prelievo,
             "valore_portafoglio": valore,
             "versamento_mese": versato_mese, "versamenti_cum": versamenti,
             "pnl_netto": valore - versamenti,
