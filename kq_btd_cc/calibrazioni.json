@@ -18,6 +18,22 @@
       "file_sorgente": "opzioni call iwm.csv",
       "calibrato_il": "2026-09-15"
     },
+    "IWM.US": {
+      "ticker": "IWM.US",
+      "vrp": 0.9676,
+      "vrp_slope": -0.125,
+      "vrp_ancora": 0.2,
+      "target_delta": 0.5,
+      "osservazioni": 220,
+      "dal": "2007-09",
+      "al": "2025-12",
+      "mae": 0.004318,
+      "bias": 0.0,
+      "r2": 0.5924,
+      "obiettivo": "livello",
+      "file_sorgente": "opzioni call iwm.csv",
+      "calibrato_il": "2026-09-15"
+    },
     "SPY.US": {
       "ticker": "SPY.US",
       "vrp": 0.913,
