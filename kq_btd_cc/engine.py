@@ -158,12 +158,15 @@ class BacktestConfig:
     capitale_modo: str = "fisso"
 
     # Cosa succede all'eccedenza al reset di gennaio.
-    #   False  resta sul conto come liquidita', e frutta `idle_cash_rate`
-    #   True   esce tutta: il ciclo annuale si chiude davvero, a gennaio rientra
-    #          solo il capitale fisso. Da accendere se la strategia serve a fare
-    #          cassa ogni anno, altrimenti il backtest conta come rendimento
-    #          anche gli interessi su denaro che ti saresti gia' portato a casa.
-    cashout_annuale: bool = False
+    #   True   (default) esce tutta: il ciclo annuale si chiude davvero e a
+    #          gennaio rientra solo il capitale fisso. E' la lettura onesta di una
+    #          strategia che si azzera ogni anno, ed e' quella che conviene avere
+    #          come default: lasciando accumulare, il backtest conta come
+    #          rendimento anche gli interessi su denaro gia' portato a casa, e su
+    #          orizzonti lunghi possono valere un terzo dell'utile dichiarato.
+    #   False  resta sul conto come liquidita' e frutta `idle_cash_rate`. Ha senso
+    #          solo se non si preleva mai nulla.
+    cashout_annuale: bool = True
 
     # Solo in modalita' composta: quota del conto tenuta liquida a gennaio per
     # finanziare gli acquisti sui cali durante l'anno, espressa in frazione del
