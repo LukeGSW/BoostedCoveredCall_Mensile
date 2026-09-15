@@ -739,7 +739,82 @@ descrive ogni campo.
 3. In *Settings → Secrets*:
    ```toml
    EODHD_API_KEY = "la-tua-api-key"
+   # facoltativo, default 5000
+   EODHD_LIMITE_GIORNALIERO = 5000
    ```
+
+### Se la dashboard e' pubblica: il tetto giornaliero
+
+Con una sola chiave dati condivisa da tutti, la preoccupazione naturale e' che qualcuno
+bruci il plafond a forza di backtest. Il grosso del problema pero' non esiste: i download
+sono in cache per sei ore e su Streamlit Cloud **la cache e' condivisa fra tutte le
+sessioni**, perche' un solo processo serve tutti. Rilanciare il backtest cambiando boost,
+filtro, cadenza, capitale o cashout costa **zero chiamate**, e se cento persone provano lo
+stesso ticker lo si scarica una volta sola. Il costo cresce col numero di combinazioni
+ticker/periodo distinte, non col numero di utenti ne' di backtest.
+
+Sopra a questo c'e' comunque un **tetto giornaliero**, di default **5.000 scaricamenti**,
+condiviso da tutta l'app e azzerato a mezzanotte UTC. Conta solo le chiamate vere: una
+richiesta servita dalla cache non lo scalfisce. Ogni combinazione ticker/periodo mai vista
+ne consuma tre (mensile, settimanale, giornaliero).
+
+Quando si esaurisce:
+
+- chi chiede un ticker nuovo riceve un avviso che spiega che il limite e' stato raggiunto e
+  che **si azzera il giorno seguente**;
+- chi lavora su ticker gia' scaricati oggi **continua a usare la dashboard normalmente**,
+  perche' quei dati arrivano dalla cache;
+- se il budget finisce a meta' di una serie, il backtest gira lo stesso con quello che c'e'
+  e lo dice: senza i dati giornalieri il conto resta valorizzato solo a fine periodo.
+
+Quando ne resta meno del 20% la sidebar mostra il residuo, cosi' non arriva di sorpresa.
+
+### Come si scrivono i ticker
+
+Il formato e' quello di EODHD: **SIMBOLO.MERCATO**, senza spazi. La dashboard ha la stessa
+tabella in un pannello sotto il campo del ticker.
+
+| Cosa | Suffisso | Esempi |
+|---|---|---|
+| Azioni ed ETF USA | `.US` | `SPY.US` · `QQQ.US` · `AAPL.US` |
+| Criptovalute | `.CC` | `BTC-USD.CC` · `ETH-USD.CC` |
+| Indici | `.INDX` | `GSPC.INDX` · `NDX.INDX` |
+| Borsa Italiana | `.MI` | `ENI.MI` · `ISP.MI` |
+| Altre borse europee | `.LSE` `.XETRA` `.PA` `.AS` | `VOD.LSE` · `SAP.XETRA` |
+| Cambi | `.FOREX` | `EURUSD.FOREX` |
+
+Il default e' **SPY.US da gennaio 2010**. Su un indice come `GSPC.INDX` i prezzi sono senza
+dividendi e il rendimento esce piu' basso del vero di circa due punti l'anno: per un
+confronto onesto meglio l'ETF.
+
+### Avvertenze e link
+
+In fondo alla pagina c'e' un blocco di **avvertenze** sempre presente. Sta fuori dal
+contenitore delle schede, quindi si vede qualunque scheda sia aperta, e viene reso una volta
+sola invece di otto copie identiche nel DOM. Compare anche sui percorsi che si fermano
+prima: senza chiave, prima del primo backtest e quando il backtest fallisce.
+
+Dice tre cose. Che lo strumento e' informativo e didattico e non e' consulenza finanziaria.
+Che un backtest non e' una previsione e i rendimenti passati non indicano quelli futuri. E
+soprattutto quali sono i **limiti noti di questa simulazione**: i premi sono stimati con
+Black-Scholes dalla volatilita' storica e non sono prezzi reali eseguibili, non ci sono
+commissioni, spread, slittamenti ne' imposte, e si assume di poter negoziare quantita'
+frazionarie ai prezzi indicati. E' la parte piu' utile del blocco: chi legge i numeri sa
+cosa non contengono.
+
+I link a **kriterionquant.it** e al **canale YouTube** stanno sia nel piede sia in un
+riquadro in cima alla sidebar, che e' sempre sotto gli occhi visto che la sidebar non si
+puo' chiudere. Si aprono in una scheda nuova: altrimenti si perderebbe il backtest in corso,
+perche' Streamlit non conserva lo stato quando si lascia la pagina.
+
+### La sidebar non si puo' chiudere
+
+Tutti i comandi stanno nella sidebar, e chi non conosce Streamlit che la chiude per sbaglio
+non ritrova piu' niente e pensa che l'app sia rotta. Sopra i 768px il pulsante che la chiude
+e' tolto via CSS. Il pulsante che la **riapre** non viene mai nascosto, anzi e' evidenziato:
+nasconderlo lascerebbe l'utente in trappola se la sidebar risultasse chiusa per altra via.
+Sotto i 768px resta il comportamento normale di Streamlit, perche' su telefono una sidebar
+fissa coprirebbe la pagina.
 
 ### Scegliere il periodo
 
