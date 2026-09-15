@@ -13,7 +13,8 @@ import pandas as pd
 
 from . import charts
 from .cadenza import adatta, normalizza
-from .data_api import ChiaveMancante, DatiNonDisponibili, carica_serie
+from .data_api import (ChiaveMancante, DatiNonDisponibili, LimiteGiornaliero,
+                       carica_serie)
 from .engine import BacktestConfig, run_backtest
 from .pricing import PremiumModel
 
@@ -170,7 +171,7 @@ def esegui_analisi_completa(
     if dati is None:
         try:
             dati = carica_serie(cfg.ticker, cfg.start_date, cfg.end_date)
-        except (ChiaveMancante, DatiNonDisponibili) as e:
+        except (ChiaveMancante, DatiNonDisponibili, LimiteGiornaliero) as e:
             return {"ok": False, "errore": str(e), "risultato": None,
                     "figure": {}, "figures": [], "figures_extra": [], "avvisi": []}
     avvisi += list(dati.get("avvisi", []))
