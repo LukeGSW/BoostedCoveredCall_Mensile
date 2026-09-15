@@ -216,6 +216,9 @@ def compute_metrics(df: pd.DataFrame, confidence: float = 0.99,
         "cassa_finale": _f(df["cassa"].iloc[-1]),
         "finanziamento_massimo": _f(-min(0.0, float(df["cassa"].min()))),
         "mesi_a_debito": int((df["cassa"] < -1e-9).sum()),
+        # Quanto e' costato il saldo negativo: zero se la riserva era allocata.
+        "interessi_passivi": (_f(df.loc[df["interessi"] < 0, "interessi"].sum())
+                              if "interessi" in df.columns else None),
         "interessi_netti": _f(df["interessi"].sum()) if "interessi" in df.columns else None,
 
         # Rendimento: semplice, annuo, sul capitale davvero investito
@@ -414,7 +417,7 @@ def metrics_table(risultati: Dict[str, Any]) -> pd.DataFrame:
         "premi_saldo_minimo",
         "capitale_medio_impiegato", "quota_conto_investita",
         "cassa_media",
-        "finanziamento_massimo", "mesi_a_debito",
+        "finanziamento_massimo", "mesi_a_debito", "interessi_passivi",
         "btd_prezzo_medio", "btd_quote_comprate", "btd_tagliato_dal_tetto",
         "btd_segnali_saltati", "btd_calo_peggiore_saltato", "anni_con_tetto_esaurito",
         "ciclo_rendimento_medio", "ciclo_rendimento_volatilita",
@@ -486,6 +489,7 @@ ETICHETTE = {
     "anni_con_tetto_esaurito": "Anni in cui il tetto si e esaurito",
     "finanziamento_massimo": "Massimo saldo a debito",
     "mesi_a_debito": "Mesi con saldo a debito",
+    "interessi_passivi": "Interessi pagati sul saldo negativo",
     "bh_stessi_flussi_pnl": "Utile del B&H a parita di flussi",
     "ciclo_pnl": "Utile del solo sottostante, stesso ciclo annuale",
     "ciclo_rendimento_medio": "Rendimento medio annuo del solo sottostante",
