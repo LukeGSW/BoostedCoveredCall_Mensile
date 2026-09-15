@@ -364,11 +364,31 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                      "qualche anno puo' essere meta' del conto. A 0% quella meta' non rende "
                      "nulla per tutto il backtest. Metti il tasso che ti riconoscono davvero "
                      "sul saldo, o quello di un monetario se ce la parcheggi.") / 100.0
-            debito = st.slider(
-                "Costo del saldo a debito (annuo)", 0.0, 15.0, 6.0, 0.5,
-                help="Quando il regolamento della call a scadenza supera la liquidita' "
-                     "disponibile, il conto va a debito contro le azioni in portafoglio. "
-                     "Questo e' il tasso applicato a quel finanziamento.") / 100.0
+            # Il regolamento della call puo' superare la cassa. Cosa vuol dire
+            # quel saldo negativo dipende da come hai impostato il conto, e sono
+            # due cose diverse: riserva gia' tua che si consuma, oppure denaro
+            # del broker che costa.
+            fonte_label = st.radio(
+                "Se il regolamento della call supera la cassa",
+                ["Attinge alla riserva allocata a inizio anno",
+                 "Va a debito sul conto"],
+                index=0,
+                help="La strategia chiede di destinarle molto piu' del capitale "
+                     "iniziale — sul mensile circa il doppio, lo vedi in "
+                     "'Capitale massimo impiegato'. Se quella riserva l'hai "
+                     "messa da parte davvero, il regolamento si paga con quella "
+                     "e non costa niente: il saldo negativo misura quanta "
+                     "riserva hai assorbito, non un debito. Scegli 'a debito' "
+                     "solo se sul conto tieni il minimo e ti fai finanziare dal "
+                     "broker contro le azioni.")
+            fonte_liquidita = ("riserva" if fonte_label.startswith("Attinge")
+                               else "debito")
+            debito = 0.06
+            if fonte_liquidita == "debito":
+                debito = st.slider(
+                    "Costo del saldo a debito (annuo)", 0.0, 15.0, 6.0, 0.5,
+                    help="Il tasso applicato al finanziamento, garantito dalle azioni "
+                         "in portafoglio.") / 100.0
 
         with st.expander("Buy-The-Dip", expanded=True):
             reinvesto_label = st.radio(
@@ -626,6 +646,7 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
         "vol_blend": float(blend),
         "ewma_lambda": float(lam),
         "idle_cash_rate": float(idle),
+        "fonte_liquidita": str(fonte_liquidita),
         "debit_cash_rate": float(debito),
         "var_confidence": float(var_conf),
         "premium_model": PremiumModel(vrp=float(vrp), vrp_slope=float(vrp_slope),
@@ -880,16 +901,25 @@ def scheda_opzione(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
 
     finanziamento = cash.get("finanziamento_massimo") or 0.0
     if finanziamento > 0.05 * float(cfg.get("capitale_iniziale", 1)):
-        st.warning(
-            f"Il regolamento delle call in-the-money ha portato il conto a debito fino a "
-            + A(f"{fmt_currency_compact(finanziamento)} per "
-                f"{cash.get('mesi_a_debito', 0)} mesi ") +
-            f"({fmt_pct(finanziamento / float(cfg.get('capitale_iniziale', 1)), 0)} del capitale "
-            f"fisso). Sul finanziamento e' applicato il "
-            f"{cfg.get('debit_cash_rate', 0):.1%} annuo impostato nella sidebar. "
-            f"Se preferisci evitarlo, tieni i premi in cassa invece di reinvestirli, "
-            f"oppure vendi la call a un delta piu' basso."
-        )
+        quota = fmt_pct(finanziamento / float(cfg.get("capitale_iniziale", 1)), 0)
+        quanto = A(f"{fmt_currency_compact(finanziamento)} per "
+                   f"{cash.get('mesi_a_debito', 0)} mesi ")
+        if str(cfg.get("fonte_liquidita", "riserva")) == "debito":
+            st.warning(
+                f"Il regolamento delle call in-the-money ha portato il conto a debito "
+                f"fino a " + quanto + f"({quota} del capitale fisso). Sul finanziamento "
+                f"e' applicato il {cfg.get('debit_cash_rate', 0):.1%} annuo impostato "
+                f"nella sidebar, per un totale di "
+                f"{fmt_currency_compact(abs(cash.get('interessi_passivi') or 0))}. "
+                f"Se invece la riserva l'hai allocata a inizio anno, cambia "
+                f"l'impostazione in sidebar: quel costo non lo paghi.")
+        else:
+            st.info(
+                f"Il regolamento delle call ha assorbito riserva fino a " + quanto +
+                f"({quota} del capitale fisso), oltre al capitale gia' impiegato. "
+                f"Non costa interessi perche' e' denaro tuo gia' allocato, ma va "
+                f"tenuto disponibile: e' la ragione per cui il capitale da destinare "
+                f"alla strategia e' piu' alto di quello che entra a gennaio.")
     if cfg.get("cashout_annuale"):
         y = risultato["varianti"]["premi_cash"]["yearly"]
         e = y["risultato_anno"]
@@ -1526,6 +1556,10 @@ cosi' che il cap sull'upside costa davvero, mese dopo mese.
 Quando il sottostante chiude un mese in negativo scatta il **Buy-The-Dip**: si investe
 l'entita' del calo applicata al capitale fisso, maggiorata di un boost, fino a un tetto
 annuo. Queste quote extra restano scoperte.
+
+Se il regolamento della call supera la cassa, il saldo va sotto zero: e' riserva
+tua che si consuma se l'hai allocata a inizio anno — ed e' quello che il motore
+assume — oppure un finanziamento del broker, se scegli l'altra impostazione.
 
 A fine anno si **liquida tutto** e si riparte dallo stesso capitale fisso. L'eccedenza
 resta come cassa; se manca capitale si versa la differenza — e quella e' un versamento,
