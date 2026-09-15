@@ -17,9 +17,17 @@ Modello (una riga = un periodo, mese o settimana):
     sottostante (quindi diverso ogni volta: N * open_periodo * premio_pct).
     Sulla cadenza settimanale la call dura sette giorni invece di trenta: il
     singolo premio vale circa la meta', ma se ne incassano 52 invece di 12.
-  * A scadenza, se la call e' in-the-money la si riacquista al valore
-    intrinseco pagando in contanti: le quote restano le stesse. E' qui che si
-    paga il costo del cap sull'upside, e il costo si accumula davvero.
+  * La call si porta a SCADENZA, non la si ricompra sul mercato. Se finisce
+    in-the-money il costo e' il valore intrinseco, e si paga in uno dei due
+    modi a seconda del sottostante: regolamento in contanti (opzioni su
+    indice, che sono europee e cash-settled), oppure assegnazione, cioe' si
+    consegna il sottostante allo strike e lo si ricompra subito al prezzo di
+    mercato per ricostituire la base coperta. Le due strade costano la stessa
+    identica cifra: consegnare a K e ricomprare a S significa sborsare S - K,
+    che e' l'intrinseco. Per questo il motore contabilizza un esborso pari
+    all'intrinseco con le quote invariate: non e' una scorciatoia, e' la
+    stessa aritmetica. E' qui che si paga il cap sull'upside, e il costo si
+    accumula davvero.
   * Quando il sottostante ha un periodo negativo scatta il Buy-The-Dip: si
     acquista |rendimento del periodo precedente| * capitale_iniziale, piu' il
     BOOST, una percentuale fissa del capitale iniziale che si aggiunge a ogni
@@ -217,7 +225,7 @@ class BacktestConfig:
 
     # Opzione
     strike_mode: str = "delta"                 # "delta" (0.50) | "atm_spot"
-    applica_cap: bool = True                   # riacquisto a intrinseco a scadenza
+    applica_cap: bool = True                   # regolamento a intrinseco a scadenza
 
     # Stima della volatilita'.
     # I default vengono da uno sweep su 1.581 premi reali di call ATM mensili
@@ -515,7 +523,7 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
             anno_corrente = data.year
 
         # Interessi sulla liquidita'. Il saldo puo' andare a debito quando il
-        # riacquisto della call a intrinseco supera la cassa disponibile: e' un
+        # regolamento della call a intrinseco supera la cassa disponibile: e' un
         # finanziamento garantito dalle azioni in portafoglio, e come tale costa.
         totale_liquido = cassa + cassa_opzioni
         interessi = 0.0
