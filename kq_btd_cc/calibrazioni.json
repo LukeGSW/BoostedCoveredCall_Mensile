@@ -34,6 +34,22 @@
       "file_sorgente": "opzioni call iwm.csv",
       "calibrato_il": "2026-09-15"
     },
+    "QQQ.US": {
+      "ticker": "QQQ.US",
+      "vrp": 0.9603,
+      "vrp_slope": -0.125,
+      "vrp_ancora": 0.2,
+      "target_delta": 0.5,
+      "osservazioni": 219,
+      "dal": "2007-09",
+      "al": "2025-12",
+      "mae": 0.004467,
+      "bias": 0.0,
+      "r2": 0.5273,
+      "obiettivo": "livello",
+      "file_sorgente": "opzioni call qqq.csv",
+      "calibrato_il": "2026-09-15"
+    },
     "SPY.US": {
       "ticker": "SPY.US",
       "vrp": 0.913,
