@@ -62,7 +62,7 @@ investito, e i drawdown restano time-weighted sulla singola barra.
 il singolo premio vale circa la meta' di quello mensile — il valore temporale cresce con
 la radice del tempo, non con il tempo — ma se ne incassano 52 invece di 12: l'incasso
 lordo dell'anno **circa raddoppia**. Cresce pero' anche il numero di volte in cui la call
-finisce in-the-money e va riacquistata a intrinseco, e soprattutto esplode il numero di
+finisce in-the-money e va regolata a intrinseco, e soprattutto esplode il numero di
 Buy-The-Dip: su otto anni di test sintetici, 178 acquisti contro 40. E' la versione
 aggressiva: piu' premio incassato, ma anche molto piu' capitale da tirare fuori per i cali
 e piu' occasioni di farsi tagliare il rialzo. Con il **boost** conviene tenerne conto —
@@ -106,8 +106,17 @@ liquidate a fine anno.
 **La call.** Ogni mese si vende una call con scadenza a fine mese, strike a delta 0.50
 (quindi appena sopra lo spot, tanto piu' quanto e' alta la volatilita'). Il premio e' una
 percentuale del prezzo corrente del sottostante, quindi l'incasso in valuta cambia ogni
-mese. A scadenza, se la call e' in-the-money la si **riacquista al valore intrinseco**: le
-quote restano le stesse e il costo del cap sull'upside si accumula davvero, mese dopo mese.
+mese. La call **si porta a scadenza**, non la si ricompra sul mercato: se finisce
+in-the-money il costo e' il **valore intrinseco**, pagato come addebito in contanti sugli
+indici (opzioni europee cash-settled) oppure, dove c'e' consegna fisica, subendo
+l'assegnazione e ricomprando subito la stessa quantita' sul mercato. Le due strade costano
+la stessa cifra — consegnare a K e ricomprare a S vuol dire sborsare S - K, cioe'
+l'intrinseco — e il motore le rappresenta entrambe come un esborso a intrinseco con le
+quote invariate. Il costo del cap sull'upside si accumula davvero, mese dopo mese.
+
+Sui sottostanti di stile americano l'assegnazione puo' arrivare **prima** della scadenza,
+tanto piu' facilmente quanto piu' la call e' in-the-money e vicina a uno stacco di
+dividendo: il conto economico non cambia, ma l'operazione si anticipa e va gestita.
 
 **Buy-The-Dip.** Quando il mese precedente chiude in negativo si investe l'entita' del calo
 applicata al capitale fisso. Il segnale e' noto alla chiusura del mese precedente e
@@ -452,7 +461,7 @@ che non liquida mai sembra irraggiungibile: quello tiene il 100% investito e cap
 senza interruzioni, la strategia ne tiene circa la meta'. La dashboard avvisa quando la quota
 investita scende sotto l'80%.
 
-**Saldo a debito.** Se il riacquisto di una call molto in-the-money supera la liquidita'
+**Saldo a debito.** Se il regolamento di una call molto in-the-money supera la liquidita'
 disponibile, il conto va a debito contro le azioni in portafoglio. Il finanziamento e'
 tracciato, gli si applica un tasso configurabile, e la dashboard avvisa quando diventa
 rilevante.
