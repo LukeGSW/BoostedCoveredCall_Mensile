@@ -1,12 +1,18 @@
-"""Accesso ai dati EODHD, con cache e ricostruzione degli OHLC aggiustati.
+"""Accesso ai dati EODHD, con cache, tetto giornaliero e OHLC aggiustati.
 
 Le chiamate sono memorizzate in cache da Streamlit: cambiare un parametro che
-non tocca i dati (premio, boost, tema) non riscarica nulla.
+non tocca i dati (premio, boost, tema) non riscarica nulla. Su Streamlit Cloud
+la cache e' condivisa fra tutte le sessioni, quindi il costo cresce col numero
+di combinazioni ticker/periodo distinte, non col numero di utenti o di backtest.
+
+A protezione della chiave c'e' comunque un TETTO GIORNALIERO sul numero di
+download effettivi, condiviso da tutta l'app e azzerato a mezzanotte UTC. Conta
+solo le chiamate vere: una richiesta servita dalla cache non consuma budget.
 """
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Optional
 
 import numpy as np
@@ -16,6 +22,13 @@ import requests
 BASE_URL = "https://eodhd.com/api/eod/{ticker}"
 TIMEOUT = 45
 COLONNE = ["Open", "High", "Low", "Close", "Volume"]
+
+# Tetto giornaliero di download, sovrascrivibile dai secrets con
+# EODHD_LIMITE_GIORNALIERO. Ogni backtest su una combinazione ticker/periodo mai
+# vista costa tre chiamate (mensile, settimanale, giornaliero); tutto il resto
+# arriva dalla cache e non conta.
+LIMITE_GIORNALIERO_DEFAULT = 5000
+CHIAMATE_PER_SERIE = 3
 
 # Giorni di storico extra scaricati prima della data di inizio, per dare allo
 # stimatore di volatilita' una finestra di riscaldamento gia' piena al mese 1.
@@ -29,6 +42,92 @@ class DatiNonDisponibili(RuntimeError):
 
 class ChiaveMancante(RuntimeError):
     """Nessuna API key EODHD configurata."""
+
+
+class LimiteGiornaliero(RuntimeError):
+    """Esaurito il tetto giornaliero di chiamate condiviso da tutta l'app."""
+
+
+# ----------------------------------------------------------------------------
+# Tetto giornaliero condiviso
+# ----------------------------------------------------------------------------
+def limite_giornaliero() -> int:
+    """Tetto configurato, dai secrets o dall'ambiente, altrimenti il default."""
+    for fonte in (_da_secrets, os.getenv):
+        try:
+            v = fonte("EODHD_LIMITE_GIORNALIERO")
+        except Exception:
+            v = None
+        if v is not None:
+            try:
+                return max(0, int(v))
+            except (TypeError, ValueError):
+                pass
+    return LIMITE_GIORNALIERO_DEFAULT
+
+
+def _da_secrets(chiave: str):
+    import streamlit as st
+    return st.secrets[chiave] if chiave in st.secrets else None
+
+
+def _contatore() -> Dict[str, object]:
+    """Contatore unico per tutta l'app, non per sessione.
+
+    `st.cache_resource` restituisce lo stesso oggetto a ogni sessione e a ogni
+    rerun, quindi il conteggio e' davvero globale finche' il processo vive. Fuori
+    da Streamlit (test, script) si ripiega su un dizionario di modulo.
+    """
+    try:
+        import streamlit as st
+
+        @st.cache_resource(show_spinner=False)
+        def _singleton() -> Dict[str, object]:
+            return {"giorno": None, "usate": 0}
+
+        return _singleton()
+    except Exception:
+        return _CONTATORE_LOCALE
+
+
+_CONTATORE_LOCALE: Dict[str, object] = {"giorno": None, "usate": 0}
+
+
+def _oggi_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def stato_budget() -> Dict[str, object]:
+    """Quante chiamate sono state usate oggi e quante ne restano."""
+    c = _contatore()
+    oggi = _oggi_utc()
+    if c.get("giorno") != oggi:          # nuovo giorno: si riparte da zero
+        c["giorno"], c["usate"] = oggi, 0
+    tetto = limite_giornaliero()
+    usate = int(c["usate"])
+    return {"giorno": oggi, "usate": usate, "tetto": tetto,
+            "residue": max(0, tetto - usate), "esaurito": usate >= tetto}
+
+
+def _consuma(quante: int = 1) -> None:
+    """Scala il budget, o solleva LimiteGiornaliero se non basta."""
+    st_ = stato_budget()
+    if st_["residue"] < quante:
+        raise LimiteGiornaliero(messaggio_limite())
+    _contatore()["usate"] = int(_contatore()["usate"]) + quante
+
+
+def messaggio_limite() -> str:
+    st_ = stato_budget()
+    return (
+        f"**Limite giornaliero raggiunto.** Questa dashboard scarica i dati con "
+        f"una sola chiave, condivisa da tutti quelli che la usano, e ha un tetto "
+        f"di {st_['tetto']:,} scaricamenti al giorno per non esaurirla. Oggi sono "
+        f"finiti tutti ({st_['usate']:,}). **Il limite si azzera domani.** "
+        f"Nel frattempo puoi continuare a lanciare backtest sui ticker e sui "
+        f"periodi gia' scaricati oggi: quelli arrivano dalla cache e non "
+        f"consumano nulla."
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -156,6 +255,9 @@ def _cache_wrapper():
 
 @_cache_wrapper()
 def _fetch_cached(ticker: str, start: str, end: str, period: str, api_key: str) -> pd.DataFrame:
+    # Questo corpo gira SOLO quando la cache non ha gia' la risposta: e' il punto
+    # esatto in cui parte una chiamata vera, ed e' quindi dove va scalato il budget.
+    _consuma(1)
     return _scarica(ticker, start, end, period, api_key)
 
 
@@ -183,6 +285,10 @@ def carica_serie(ticker: str, start_date: str, end_date: Optional[str] = None,
     warmup = (datetime.strptime(start_date, "%Y-%m-%d").date()
               - timedelta(days=WARMUP_GIORNI)).strftime("%Y-%m-%d")
 
+    # Nessun controllo a monte: il budget va scalato solo dove parte una chiamata
+    # vera, cioe' dentro `_fetch_cached` quando la cache non ha la risposta. Un
+    # controllo qui bloccherebbe anche i ticker gia' scaricati oggi, che invece
+    # devono continuare a funzionare: e' quello che promette il messaggio.
     avvisi = []
     mensile = fetch_eodhd_ohlc(ticker, inizio, fine, "m")
     if mensile.empty or len(mensile) < 2:
@@ -192,6 +298,12 @@ def carica_serie(ticker: str, start_date: str, end_date: Optional[str] = None,
 
     try:
         settimanale = fetch_eodhd_ohlc(ticker, warmup, fine, "w")
+    except LimiteGiornaliero:
+        # Il mensile c'era gia' in cache ma il resto no: si va avanti con quello
+        # che c'e', come per qualunque altro dato mancante.
+        settimanale = pd.DataFrame()
+        avvisi.append("Dati settimanali non scaricati: limite giornaliero di "
+                      "scaricamenti raggiunto, si azzera domani.")
     except (DatiNonDisponibili, requests.RequestException) as e:
         settimanale = pd.DataFrame()
         avvisi.append(f"Dati settimanali non scaricati: {e}")
@@ -200,6 +312,10 @@ def carica_serie(ticker: str, start_date: str, end_date: Optional[str] = None,
     if con_giornalieri:
         try:
             giornaliero = fetch_eodhd_ohlc(ticker, warmup, fine, "d")
+        except LimiteGiornaliero:
+            avvisi.append("Dati giornalieri non scaricati: limite giornaliero di "
+                          "scaricamenti raggiunto, si azzera domani. Il conto restera' "
+                          "valorizzato solo a fine periodo.")
         except (DatiNonDisponibili, requests.RequestException) as e:
             avvisi.append(f"Dati giornalieri non scaricati: {e}")
 
