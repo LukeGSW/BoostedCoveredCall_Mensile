@@ -372,11 +372,11 @@ non come un investimento che cresce, ma come una **macchina che ogni anno produc
 Metti dentro il capitale a gennaio, a dicembre liquidi, ti porti via tutto, e l'anno dopo
 ricominci uguale.
 
-Se e' cosi' che la usi, la casella **Prelevare tutto a fine anno** nella sidebar, sotto
-*Capitale*, va accesa — e non e' un dettaglio estetico. Con il cashout spento l'eccedenza
-resta sul conto e matura la remunerazione della liquidita', anno dopo anno, su denaro che
-tu ti saresti gia' portato a casa. Su SPY dal 2010, con 70.000 di capitale fisso e la cassa
-al 3%:
+E' cosi' che la dashboard la legge **di default**: la casella *Prelevare tutto a fine anno*,
+nella sidebar sotto *Capitale*, parte spuntata. Togliendola l'eccedenza resta sul conto e
+matura la remunerazione della liquidita', anno dopo anno, su denaro che ti saresti gia'
+portato a casa — quindi va tolta solo se non ritiri mai niente. Su SPY dal 2010, con 70.000
+di capitale fisso e la cassa al 3%:
 
 | | Senza cashout | **Con cashout** |
 |---|---|---|
@@ -388,8 +388,8 @@ al 3%:
 Un quarto dell'utile erano interessi su soldi che non avresti mai avuto sul conto. La
 differenza fra le due colonne e' **interamente** quella voce: la strategia in se' non
 cambia di un centesimo, cambia solo cosa le si attribuisce. La dashboard lo dice da sola,
-con un avviso in cima alla scheda *Opzione e premio* quando gli interessi superano il 10%
-dell'utile.
+con un avviso in cima alla scheda *Opzione e premio* quando la casella e' tolta e gli
+interessi superano il 10% dell'utile.
 
 Con il cashout acceso il quadro resta favorevole, ma sui numeri veri:
 
@@ -558,6 +558,42 @@ Due scelte di progetto derivano direttamente da questi dati:
   l'errore assoluto resta una sottostima sistematica del 7-14%, minimizzando quello relativo
   si arriva al 20-48%. Allineando direttamente il premio medio lo scarto va a zero, che e'
   cio' che conta quando a fare il risultato e' il totale incassato.
+
+### Tarature salvate: valgono per tutti
+
+Le calibrazioni fatte sui prezzi reali non restano nella sessione di chi le ha caricate:
+finiscono in **`kq_btd_cc/calibrazioni.json`**, un file che viaggia col repository. Chi apre
+la dashboard e sceglie un sottostante gia' calibrato ottiene subito il premio tarato sui
+prezzi veri delle sue opzioni, **senza toccare niente e senza caricare nulla**.
+
+Il selettore *Taratura del premio* resta su **Predefinito**: e' quella voce a diventare
+intelligente. Se per il ticker scelto esiste una taratura salvata la usa e lo dichiara con
+un riquadro verde; altrimenti usa quella generale, misurata su 1.666 vendite reali di call
+ATM mensili, e scrive che per quel sottostante non ce n'e' una dedicata. *Manuale* resta
+per chi vuole mettere le mani sui due parametri.
+
+La taratura e' legata al **ticker**, non alla sessione: calibrare su SPY non cambia nulla su
+QQQ, e passare da un sottostante all'altro cambia automaticamente i parametri. E' importante
+perche' il VRP non e' lo stesso ovunque.
+
+**Come si aggiunge un sottostante.** L'applicazione non puo' salvare da sola: su Streamlit
+Cloud il disco torna com'era nel repository a ogni riavvio. Il giro e' quindi:
+
+1. carica i prezzi reali nella scheda *Calibrazione premio* e premi **Calibra**;
+2. la dashboard propone il download di `calibrazioni.json` **gia' completo** — le tarature
+   che c'erano piu' quella nuova, in ordine alfabetico;
+3. sostituisci con quel file `kq_btd_cc/calibrazioni.json` nel repository.
+
+Al riavvio successivo quel sottostante risulta calibrato per chiunque. Ricalibrare un ticker
+gia' presente ne sostituisce la riga invece di duplicarla.
+
+Un file assente, vuoto o malformato non e' un errore: si torna semplicemente alla taratura
+generale.
+
+**Cosa c'e' dentro oggi.** SPY, da 228 call mensili a delta ~0,52 esportate da OptionLAB coi
+prezzi al mid, fra il 2007 e il 2025: VRP **0,913** contro lo 0,96 generale, errore medio
+0,40 punti percentuali di spot, R² 0,565. Il modello generale sovrastimava i premi di SPY
+del **5%** — poco, se si pensa che la prima versione a percentuale fissa sbagliava del 205%.
 
 ### Calibrare il VRP sui prezzi reali
 
