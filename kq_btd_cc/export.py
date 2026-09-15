@@ -189,6 +189,13 @@ def build_export(
                     "Il premio e' una percentuale del prezzo corrente del sottostante, "
                     "quindi l'incasso in valuta cambia ogni mese."
                 ),
+                "fabbisogno_di_cassa": (
+                    "Il saldo di cassa va sotto zero quando il regolamento della call "
+                    "supera la liquidita'. Con fonte_liquidita='riserva' quel segno meno "
+                    "e' riserva allocata a inizio anno che viene assorbita, e non costa "
+                    "nulla; con 'debito' e' un finanziamento del broker e paga "
+                    "debit_cash_rate. Cambia solo il costo, non la posizione."
+                ),
                 "cashout": (
                     "Con cashout_annuale=true il reset e' un ciclo chiuso: a dicembre esce "
                     "tutto (liquidazione piu' cassa) e a gennaio rientra solo il capitale "
