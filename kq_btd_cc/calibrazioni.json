@@ -2,6 +2,22 @@
   "_nota": "Tarature del premio ricavate dai prezzi reali delle opzioni, una per ticker. Questo file viaggia col repository: chi apre la dashboard trova gia' calibrati i sottostanti elencati qui, senza dover caricare niente. Per aggiungerne uno: calibra nella scheda 'Calibrazione premio', scarica il file aggiornato che la dashboard propone e sostituisci questo. Le chiavi sono i ticker in maiuscolo.",
   "_schema": 1,
   "calibrazioni": {
+    "DIA.US": {
+      "ticker": "DIA.US",
+      "vrp": 1.3474,
+      "vrp_slope": -0.125,
+      "vrp_ancora": 0.2,
+      "target_delta": 0.5,
+      "osservazioni": 298,
+      "dal": "2001-02",
+      "al": "2025-12",
+      "mae": 0.005818,
+      "bias": 0.0,
+      "r2": 0.3078,
+      "obiettivo": "livello",
+      "file_sorgente": "opzioni call iwm.csv",
+      "calibrato_il": "2026-09-15"
+    },
     "SPY.US": {
       "ticker": "SPY.US",
       "vrp": 0.913,
