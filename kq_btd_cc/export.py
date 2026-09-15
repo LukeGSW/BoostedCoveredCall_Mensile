@@ -66,7 +66,7 @@ DIZIONARIO_CAMPI: Dict[str, str] = {
     "quote_coperte": "Quote coperte dalla covered call, costanti nell'anno",
     "quote_extra": "Quote non coperte (capitale addizionale, BTD, reinvestimenti)",
     "cassa": "Liquidita' totale del conto, operativa piu' quella dei premi; negativa "
-             "quando il riacquisto della call e' finanziato a debito contro le azioni",
+             "quando il regolamento della call e' finanziato a debito contro le azioni",
     "cassa_opzioni": "Parte della liquidita' che viene dai premi incassati meno "
                      "l'intrinseco pagato. Nella variante Cash resta separata e non "
                      "finanzia gli acquisti sui cali, che si pagano con capitale proprio",
@@ -181,8 +181,9 @@ def build_export(
             ),
             "convenzioni": {
                 "cap_covered_call": (
-                    "La call viene riacquistata al valore intrinseco a scadenza: il costo "
-                    "dell'upside tagliato si accumula davvero mese dopo mese."
+                    "La call si porta a scadenza e si regola al valore intrinseco, in "
+                    "contanti o via assegnazione e riacquisto del sottostante: il costo "
+                    "e' lo stesso, e quello dell'upside tagliato si accumula davvero."
                 ),
                 "premio": (
                     "Il premio e' una percentuale del prezzo corrente del sottostante, "
