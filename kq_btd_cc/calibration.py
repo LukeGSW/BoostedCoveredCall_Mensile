@@ -13,6 +13,9 @@ premio su quel sottostante, e finisce nel JSON di export.
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -420,6 +423,94 @@ def confronta_modelli_vol(
         return pd.DataFrame()
     ordine = "mape" if obiettivo == "relativo" else "rmse"
     return pd.DataFrame(righe).sort_values(ordine).reset_index(drop=True)
+
+
+# ----------------------------------------------------------------------------
+# Tarature salvate nel repository
+# ----------------------------------------------------------------------------
+# Streamlit Cloud non conserva quello che l'app scrive: a ogni riavvio il disco
+# torna com'era nel repository. Per far trovare i sottostanti gia' calibrati a
+# chiunque apra la dashboard, le tarature vanno quindi messe in un file versionato
+# insieme al codice. Il giro e': si calibra nella scheda, si scarica il file
+# aggiornato che la dashboard propone, lo si sostituisce nel repository.
+PERCORSO_CALIBRAZIONI = Path(__file__).with_name("calibrazioni.json")
+
+
+def normalizza_ticker(ticker: Any) -> str:
+    return str(ticker or "").strip().upper()
+
+
+def carica_calibrazioni(percorso: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
+    """Le tarature salvate nel repository, indicizzate per ticker in maiuscolo.
+
+    Un file assente o malformato non e' un errore: si torna semplicemente alla
+    taratura predefinita, che e' un comportamento valido.
+    """
+    p = Path(percorso) if percorso else PERCORSO_CALIBRAZIONI
+    try:
+        with open(p, encoding="utf-8") as f:
+            dati = json.load(f)
+        voci = dati.get("calibrazioni", {}) if isinstance(dati, dict) else {}
+        return {normalizza_ticker(k): v for k, v in voci.items()
+                if isinstance(v, dict) and v.get("vrp") is not None}
+    except (OSError, ValueError):
+        return {}
+
+
+def calibrazione_per_ticker(ticker: Any,
+                            percorso: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """La taratura salvata per quel sottostante, se c'e'."""
+    return carica_calibrazioni(percorso).get(normalizza_ticker(ticker))
+
+
+def riga_calibrazione(fit: Dict[str, Any], ticker: Any, nome_file: str = "",
+                      obiettivo: str = "livello",
+                      oss: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    """Compatta il risultato di una calibrazione nella riga da salvare nel file."""
+    if not fit or not fit.get("ok") or not fit.get("modello"):
+        return {}
+    mod = fit["modello"].to_dict()
+    m = fit.get("metriche", {})
+    periodo = ("", "")
+    if isinstance(oss, pd.DataFrame) and not oss.empty and "data" in oss.columns:
+        periodo = (oss["data"].min().strftime("%Y-%m"), oss["data"].max().strftime("%Y-%m"))
+    return {
+        "ticker": normalizza_ticker(ticker),
+        "vrp": round(float(mod["vrp"]), 4),
+        "vrp_slope": round(float(mod["vrp_slope"]), 4),
+        "vrp_ancora": float(mod.get("vrp_ancora", 0.20)),
+        "target_delta": float(mod.get("target_delta", 0.50)),
+        "osservazioni": int(m.get("n", 0) or 0),
+        "dal": periodo[0], "al": periodo[1],
+        "mae": round(float(m["mae"]), 6) if m.get("mae") is not None else None,
+        "bias": round(float(m["bias"]), 6) if m.get("bias") is not None else None,
+        "r2": round(float(m["r2"]), 4) if m.get("r2") is not None else None,
+        "obiettivo": obiettivo,
+        "file_sorgente": nome_file,
+        "calibrato_il": datetime.now().strftime("%Y-%m-%d"),
+    }
+
+
+def unisci_calibrazioni(nuova: Dict[str, Any],
+                        percorso: Optional[Path] = None) -> Dict[str, Any]:
+    """Il file completo con la nuova riga inserita, pronto da scaricare.
+
+    Si restituisce il file INTERO, non solo la riga nuova: cosi' si sostituisce
+    un file solo nel repository invece di doverne fondere due a mano.
+    """
+    p = Path(percorso) if percorso else PERCORSO_CALIBRAZIONI
+    try:
+        with open(p, encoding="utf-8") as f:
+            dati = json.load(f)
+        if not isinstance(dati, dict):
+            raise ValueError
+    except (OSError, ValueError):
+        dati = {"_schema": 1, "calibrazioni": {}}
+    dati.setdefault("calibrazioni", {})
+    if nuova and nuova.get("ticker"):
+        dati["calibrazioni"][nuova["ticker"]] = nuova
+    dati["calibrazioni"] = dict(sorted(dati["calibrazioni"].items()))
+    return dati
 
 
 def pacchetto_export(fit: Dict[str, Any], nome_file: Optional[str] = None,
