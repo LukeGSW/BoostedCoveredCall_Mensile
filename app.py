@@ -26,7 +26,8 @@ from kq_btd_cc import calibration as calib
 from kq_btd_cc.cadenza import CADENZE, adatta, label as etichetta_cadenza, normalizza
 from kq_btd_cc import charts
 from kq_btd_cc.core import PREFERENZE_DEFAULT, costruisci_config, costruisci_figure
-from kq_btd_cc.data_api import ChiaveMancante, DatiNonDisponibili, carica_serie, ha_api_key
+from kq_btd_cc.data_api import (ChiaveMancante, DatiNonDisponibili, LimiteGiornaliero,
+                                carica_serie, ha_api_key, stato_budget)
 from kq_btd_cc.engine import (VARIANTS, dettaglio_anno, piano_prossimo_mese,
                               run_backtest)
 from kq_btd_cc.export import build_export, export_json_bytes, nome_file_export
@@ -63,6 +64,58 @@ def _kwargs_larghezza() -> Dict[str, Any]:
 
 LARGO = _kwargs_larghezza()
 
+SITO = "https://kriterionquant.it/"
+YOUTUBE = "https://www.youtube.com/channel/UC2MPxbvTD-LRW7677pGWuMA"
+
+# I link si aprono in una scheda nuova: altrimenti si perde il backtest in corso,
+# perche' Streamlit non conserva lo stato quando si lascia la pagina.
+_ESTERNO = 'target="_blank" rel="noopener noreferrer"'
+
+DISCLAIMER = f"""
+<div class="kq-footer">
+  <div class="kq-titolo">Avvertenze</div>
+  <p><b>Questo strumento ha finalita' esclusivamente informativa e didattica.</b> Non
+  costituisce consulenza finanziaria o in materia di investimenti, non e' una raccomandazione
+  personalizzata, ne' una sollecitazione all'acquisto o alla vendita di strumenti finanziari.
+  Chi lo pubblica non opera come consulente finanziario abilitato.</p>
+  <p><b>I risultati sono simulazioni su dati storici.</b> Un backtest mostra come si sarebbe
+  comportata una regola nel passato: non e' una previsione e <b>i rendimenti passati non sono
+  indicativi di quelli futuri</b>. Le opzioni comportano rischi elevati e possono produrre
+  perdite superiori al capitale inizialmente impiegato.</p>
+  <p><b>Limiti noti di questa simulazione</b>, da tenere presenti leggendo qualunque numero:
+  i premi delle opzioni sono <b>stimati</b> con un modello di Black-Scholes a partire dalla
+  volatilita' storica, non sono prezzi reali eseguibili; non sono considerati commissioni,
+  spread denaro-lettera, slittamenti di esecuzione, costi di finanziamento diversi dal tasso
+  impostato, ne' alcuna imposizione fiscale; si assume di poter sempre negoziare quantita'
+  frazionarie ai prezzi di apertura e chiusura indicati.</p>
+  <p>Ogni decisione di investimento resta esclusiva responsabilita' di chi la assume. Valuta
+  la tua situazione personale e, se serve, rivolgiti a un professionista abilitato.</p>
+  <div class="kq-link">
+    <b>Kriterion Quant</b> &nbsp;·&nbsp;
+    <a href="{SITO}" {_ESTERNO}>kriterionquant.it</a> &nbsp;·&nbsp;
+    <a href="{YOUTUBE}" {_ESTERNO}>canale YouTube</a>
+  </div>
+</div>
+"""
+
+MARCHIO = f"""
+<div class="kq-brand">
+  <span class="kq-nome">Kriterion Quant</span>
+  <a href="{SITO}" {_ESTERNO}>Sito</a>
+  <a href="{YOUTUBE}" {_ESTERNO}>YouTube</a>
+</div>
+"""
+
+
+def piede_pagina() -> None:
+    """Avvertenze e link, in fondo alla pagina.
+
+    Va chiamata FUORI dai blocchi `with scheda:`, cosi' finisce sotto il
+    contenitore delle schede e resta visibile qualunque scheda sia aperta: una
+    sola resa invece di otto copie identiche nel DOM.
+    """
+    st.markdown(DISCLAIMER, unsafe_allow_html=True)
+
 
 def cadenza_corrente() -> str:
     """La cadenza da usare nei testi.
@@ -88,6 +141,30 @@ OGGI = dt.date.today()
 
 MESI_IT = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
            "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"]
+
+# I ticker seguono la convenzione EODHD: simbolo, punto, codice del mercato.
+FORMATI_TICKER = """
+Il formato e' sempre **SIMBOLO.MERCATO**, senza spazi e con il punto.
+
+| Cosa | Suffisso | Esempi |
+|---|---|---|
+| Azioni ed ETF USA | `.US` | `SPY.US` · `QQQ.US` · `AAPL.US` · `KO.US` |
+| Criptovalute | `.CC` | `BTC-USD.CC` · `ETH-USD.CC` |
+| Indici | `.INDX` | `GSPC.INDX` (S&P 500) · `NDX.INDX` |
+| Borsa Italiana | `.MI` | `ENI.MI` · `ISP.MI` · `STLAM.MI` |
+| Altre borse europee | `.LSE` `.XETRA` `.PA` `.AS` | `VOD.LSE` · `SAP.XETRA` |
+| Cambi | `.FOREX` | `EURUSD.FOREX` |
+
+Il suffisso e' obbligatorio: `SPY` da solo non funziona, ci vuole `SPY.US`.
+
+**Attenzione a cosa scegli.** Su un indice come `GSPC.INDX` i prezzi sono senza
+dividendi, quindi il rendimento risulta piu' basso di quello vero di circa due
+punti l'anno; un ETF come `SPY.US` li incorpora ed e' il confronto piu' onesto.
+Su un titolo singolo la stima del premio e' meno affidabile che su un indice,
+perche' la volatilita' salta sugli utili trimestrali.
+
+L'elenco completo dei mercati coperti sta nella documentazione di EODHD.
+"""
 
 
 def _ultimo_giorno(anno: int, mese: int) -> dt.date:
@@ -173,6 +250,7 @@ def segno_di(valore: Optional[float]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
     with st.sidebar:
+        st.markdown(MARCHIO, unsafe_allow_html=True)
         st.markdown("### Parametri")
 
         # Lo switch sta in cima perche' decide il significato di tutto quello che
@@ -191,8 +269,11 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
 
         with st.expander("Sottostante e periodo", expanded=True):
             ticker = st.text_input(
-                "Ticker EODHD", value="BTC-USD.CC",
-                help="Formato EODHD: BTC-USD.CC, ETH-USD.CC, SPY.US, AAPL.US...").strip()
+                "Ticker", value="SPY.US",
+                help="Formato SIMBOLO.MERCATO. Esempi: SPY.US, AAPL.US, BTC-USD.CC. "
+                     "Apri la guida qui sotto per gli altri mercati.").strip()
+            with st.expander("Come si scrive un ticker", expanded=False):
+                st.markdown(FORMATI_TICKER)
             # Niente st.date_input qui: il calendario di Streamlit elenca nel menu
             # degli anni una finestra fissa di vent'anni, e ignora min_value. Con
             # max_value a oggi si ferma al 2007, tagliando fuori la bolla dot-com.
@@ -202,7 +283,7 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
             with c1:
                 anno_inizio = st.number_input(
                     "Anno di inizio", min_value=ANNO_MINIMO, max_value=OGGI.year,
-                    value=2018, step=1, format="%d",
+                    value=2010, step=1, format="%d",
                     help="Puoi scriverlo direttamente. Lo storico effettivo dipende dal "
                          "ticker: EODHD parte dalla prima data che ha.")
             with c2:
@@ -471,6 +552,18 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
             }
 
         esegui = st.button("Esegui il backtest", type="primary", **LARGO)
+        # Il tetto e' condiviso da tutta l'app: mostrarlo evita che chi lo
+        # incontra pensi a un guasto.
+        try:
+            bdg = stato_budget()
+            if bdg["esaurito"]:
+                st.error("Scaricamenti esauriti per oggi. Si azzerano domani: i ticker "
+                         "gia' caricati restano disponibili.")
+            elif bdg["residue"] < bdg["tetto"] * 0.2:
+                st.caption(f"Scaricamenti nuovi rimasti oggi: {bdg['residue']:,} "
+                           f"su {bdg['tetto']:,}")
+        except Exception:
+            pass
         # Marcatore di versione: serve a capire a colpo d'occhio se il deploy ha
         # davvero preso il codice nuovo.
         st.caption(f"kq_btd_cc {VERSIONE} · Streamlit {st.__version__}")
@@ -1305,6 +1398,7 @@ if not ha_api_key():
         "`EODHD_API_KEY = \"la-tua-chiave\"`; in locale puoi usare la variabile d'ambiente "
         "omonima oppure `.streamlit/secrets.toml`."
     )
+    piede_pagina()
     st.stop()
 
 if esegui:
@@ -1313,6 +1407,9 @@ if esegui:
             st.session_state["risultato"] = esegui_backtest(params)
             st.session_state["params"] = params
             st.session_state["run_id"] = st.session_state.get("run_id", 0) + 1
+        except LimiteGiornaliero as e:
+            st.session_state.pop("risultato", None)
+            st.warning(str(e))
         except (ChiaveMancante, DatiNonDisponibili) as e:
             st.session_state.pop("risultato", None)
             st.error(str(e))
@@ -1344,10 +1441,12 @@ non un utile. Ogni euro entrato dall'esterno viene tracciato, cosi' l'utile most
 al netto dei versamenti e i rendimenti sono time-weighted.
             """
         ))
+    piede_pagina()
     st.stop()
 
 if not risultato.get("ok"):
     st.error(risultato.get("errore", "Backtest non riuscito."))
+    piede_pagina()
     st.stop()
 
 for avviso in risultato.get("warnings", []):
@@ -1392,3 +1491,5 @@ with schede[6]:
     scheda_dati(risultato, st.session_state.get("calibrazione"))
 with schede[7]:
     scheda_calibrazione(risultato, params)
+
+piede_pagina()
