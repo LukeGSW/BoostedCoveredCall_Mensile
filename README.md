@@ -61,13 +61,34 @@ investito, e i drawdown restano time-weighted sulla singola barra.
 **Cosa aspettarsi dalla settimanale.** La call dura sette giorni invece di trenta, quindi
 il singolo premio vale circa la meta' di quello mensile — il valore temporale cresce con
 la radice del tempo, non con il tempo — ma se ne incassano 52 invece di 12: l'incasso
-lordo dell'anno **circa raddoppia**. Cresce pero' anche il numero di volte in cui la call
-finisce in-the-money e va regolata a intrinseco, e soprattutto esplode il numero di
-Buy-The-Dip: su otto anni di test sintetici, 178 acquisti contro 40. E' la versione
-aggressiva: piu' premio incassato, ma anche molto piu' capitale da tirare fuori per i cali
-e piu' occasioni di farsi tagliare il rialzo. Con il **boost** conviene tenerne conto —
-lo stesso 10% che sul mensile vale al massimo 1,2 volte il capitale iniziale in un anno,
-sul settimanale ne vale fino a 5,2.
+lordo dell'anno **circa raddoppia**. Misurato su SPY dal 2000, con capitale 50.000,
+cashout annuale e premi tarati sui prezzi reali (mensile con boost 1,5%, settimanale
+senza boost):
+
+| | Mensile | Settimanale |
+|---|---|---|
+| Premio medio per periodo | 1,84% | 0,90% |
+| Premi incassati | 300.810 | 635.659 |
+| Intrinseco pagato | 268.894 | 578.652 |
+| Netto delle opzioni | +31.916 | +57.007 |
+| Call finite in-the-money | 56,1% | 52,7% |
+| Acquisti sui cali | 115 | 608 |
+| Capitale massimo in un anno | 83.152 (1,66x) | 103.122 (2,06x) |
+| Rendimento medio annuo | 11,84% | 13,43% |
+| Raccolto mediano dell'anno | 9.684 | 10.771 |
+| Anno peggiore | -15.820 | -22.374 |
+| Drawdown giornaliero | -37,1% | -49,6% |
+| Rendimento su oscillazione | 0,91 | 0,85 |
+
+Il settimanale quindi **raccoglie di piu' e protegge molto meno**: il sottostante nello
+stesso periodo fa -55%, e dove il mensile risparmia 18 punti di discesa il settimanale ne
+risparmia meno di 6. La causa sono i 608 acquisti sui cali contro 115 — comprare ogni
+settimana chiusa in rosso vuol dire aggiungere esposizione per tutta la durata di una
+discesa, e il premio settimanale, che e' la meta', non basta a coprirla. Nel 2008: 32
+acquisti e -21,7% contro 9 acquisti e -19,0%. E' la versione aggressiva in tutti i sensi.
+Con il **boost** conviene tenerne conto — lo stesso 10% che sul mensile vale al massimo
+1,2 volte il capitale iniziale in un anno, sul settimanale ne vale fino a 5,2; il
+settimanale della tabella non ne ha affatto ed e' gia' il piu' esigente dei due.
 
 **Dati.** La cadenza settimanale usa le barre settimanali di EODHD, che vengono comunque
 gia' scaricate per il filtro sul drawdown. La volatilita' continua a stimarsi sui dati
@@ -461,10 +482,29 @@ che non liquida mai sembra irraggiungibile: quello tiene il 100% investito e cap
 senza interruzioni, la strategia ne tiene circa la meta'. La dashboard avvisa quando la quota
 investita scende sotto l'80%.
 
-**Saldo a debito.** Se il regolamento di una call molto in-the-money supera la liquidita'
-disponibile, il conto va a debito contro le azioni in portafoglio. Il finanziamento e'
-tracciato, gli si applica un tasso configurabile, e la dashboard avvisa quando diventa
-rilevante.
+**Saldo negativo: riserva o debito.** Se il regolamento di una call molto in-the-money
+supera la liquidita' disponibile, il saldo va sotto zero. Cosa significhi dipende da come
+hai impostato il conto, e `fonte_liquidita` lo chiede esplicitamente:
+
+- `"riserva"` (predefinito) — la strategia chiede di allocare a gennaio molto piu' del
+  capitale iniziale (sul mensile circa il doppio, vedi `capitale_max_impiegato`). Se quella
+  riserva c'e', il regolamento si paga con denaro gia' tuo: **nessun interesse**, e il saldo
+  negativo misura quanta riserva e' stata assorbita. E' l'unica impostazione coerente con le
+  istruzioni d'uso: dire di mettere da parte 83.000 e poi far pagare gli interessi su 5.000
+  significherebbe contarli due volte.
+- `"debito"` — chi sul conto tiene il minimo si fa finanziare dal broker contro le azioni e
+  paga `debit_cash_rate`. Su SPY 2000-2026 sono 907 euro in ventisei anni (metrica
+  `interessi_passivi`).
+
+Il motore **non inietta denaro** nel conto per ripianare: il saldo resta com'e' e cambia
+solo chi ne paga il costo. Iniettarlo alzerebbe il valore del portafoglio senza che
+`risultato_anno` lo riconosca come versamento, e il rendimento dell'anno risulterebbe
+gonfiato — un errore che in fase di sviluppo portava il rendimento medio dal 12% al 16%.
+
+Attenzione a una asimmetria dichiarata: la riserva non impiegata **non matura interessi** in
+questi conti. Chi la parcheggia davvero in un monetario incassa un rendimento che il
+backtest non conta, quindi il saldo complessivo della convenzione e' a sfavore della
+strategia, non a favore.
 
 ---
 
