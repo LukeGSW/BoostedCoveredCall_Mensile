@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import html
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -338,15 +339,17 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                      "fra parte coperta e parte scoperta, e non servono nuovi versamenti.")
             capitale_modo = ("fisso" if modo_label.startswith("Sempre") else "composto")
             cashout = st.checkbox(
-                "Prelevare tutto a fine anno (ciclo chiuso)", value=False,
-                help="Il reset di dicembre diventa un cashout totale: esce tutto, "
-                     "liquidazione e cassa, e a gennaio rientra solo il capitale fisso. "
-                     "Da accendere se la strategia ti serve per fare cassa ogni anno. "
-                     "Senza, l'eccedenza resta sul conto e matura la remunerazione della "
-                     "liquidita' qui sotto, gonfiando il risultato con gli interessi su "
-                     "denaro che ti saresti gia' portato a casa. Non si combina col "
-                     "capitale crescente: se porti via tutto non resta nulla da "
-                     "capitalizzare.")
+                "Prelevare tutto a fine anno (ciclo chiuso)", value=True,
+                help="Attivo di default, ed e' la lettura onesta: il reset di dicembre e' "
+                     "un cashout totale, esce tutto — liquidazione e cassa — e a gennaio "
+                     "rientra solo il capitale fisso. "
+                     "Togliendo la spunta l'eccedenza resta sul conto e matura la "
+                     "remunerazione della liquidita' qui sotto: su orizzonti lunghi quegli "
+                     "interessi possono valere un terzo dell'utile dichiarato, su denaro "
+                     "che chi preleva ogni anno non avrebbe mai avuto sul conto. Toglila "
+                     "solo se non ritiri mai niente. "
+                     "Non si combina col capitale crescente: se porti via tutto non resta "
+                     "nulla da capitalizzare.")
             riserva = st.slider(
                 "Riserva liquida per gli acquisti sui cali", 0, 200, 75, 5,
                 disabled=(capitale_modo == "fisso"),
@@ -410,23 +413,47 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                      "significa strike piu' lontano: meno premio, ma la call finisce "
                      "in-the-money molto piu' di rado.")
 
+            # La taratura e' legata al SOTTOSTANTE, non alla sessione: il VRP di SPY
+            # non vale per QQQ. Si cerca prima quella appena calcolata in sessione,
+            # poi quella salvata nel repository, e in entrambi i casi solo se e' del
+            # ticker che si sta studiando. Quelle nel file viaggiano col codice,
+            # quindi chiunque apra la dashboard le trova gia' pronte.
+            _tk = calib.normalizza_ticker(ticker)
             cal = st.session_state.get("calibrazione") or {}
-            mod_cal = cal.get("modello_premio") or {}
-            opzioni = ["Predefinito", "Manuale"]
-            if mod_cal:
-                opzioni.insert(1, "Calibrato sui prezzi reali")
-            scelta = st.radio(
-                "Taratura del premio", opzioni, index=1 if mod_cal else 0,
-                help="'Predefinito' usa la taratura misurata su 1.666 vendite reali di call "
-                     "ATM mensili: e' il punto di partenza giusto per un sottostante "
-                     "qualunque. 'Calibrato' compare dopo aver caricato i prezzi reali nella "
-                     "scheda Calibrazione premio. 'Manuale' apre i due parametri del modello.")
+            in_sessione = ((cal.get("modello_premio") or {})
+                           if calib.normalizza_ticker(cal.get("ticker")) == _tk else {})
+            salvata = calib.calibrazione_per_ticker(_tk) or {}
 
-            if scelta == "Calibrato sui prezzi reali":
-                vrp = float(mod_cal.get("vrp", PREMIO_DEFAULT.vrp))
-                vrp_slope = float(mod_cal.get("vrp_slope", PREMIO_DEFAULT.vrp_slope))
-                st.caption(f"Da {cal.get('file_sorgente', 'file caricato')} · "
-                           f"{cal.get('metriche', {}).get('n', 0)} osservazioni")
+            if in_sessione:
+                taratura = {"vrp": in_sessione.get("vrp"),
+                            "vrp_slope": in_sessione.get("vrp_slope"),
+                            "nota": (f"appena calibrata da {cal.get('file_sorgente', 'file')} · "
+                                     f"{cal.get('metriche', {}).get('n', 0)} osservazioni")}
+            elif salvata:
+                periodo = (f" · dal {salvata['dal']} al {salvata['al']}"
+                           if salvata.get("dal") else "")
+                taratura = {"vrp": salvata.get("vrp"), "vrp_slope": salvata.get("vrp_slope"),
+                            "nota": (f"salvata per {_tk} · "
+                                     f"{salvata.get('osservazioni', 0)} osservazioni{periodo}")}
+            else:
+                taratura = {}
+
+            scelta = st.radio(
+                "Taratura del premio", ["Predefinito", "Manuale"], index=0,
+                help="Su 'Predefinito' non c'e' niente da fare: se per il sottostante scelto "
+                     "esiste una taratura ricavata dai prezzi veri delle opzioni, "
+                     "l'applicazione la usa da sola; altrimenti usa quella generale, "
+                     "misurata su 1.666 vendite reali di call ATM mensili. 'Manuale' apre "
+                     "i due parametri del modello per chi vuole metterci mano.")
+
+            if scelta == "Predefinito" and taratura:
+                # Taratura del sottostante: si applica da sola, senza chiedere nulla.
+                vrp = float(taratura.get("vrp") or PREMIO_DEFAULT.vrp)
+                vrp_slope = float(taratura["vrp_slope"]
+                                  if taratura.get("vrp_slope") is not None
+                                  else PREMIO_DEFAULT.vrp_slope)
+                st.success(f"**Premio tarato sui prezzi reali di {_tk}.** "
+                           f"{taratura['nota']}.")
             elif scelta == "Manuale":
                 vrp = st.slider(
                     "Livello: quanto la volatilita implicita supera quella realizzata",
@@ -442,6 +469,10 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
             else:
                 vrp, vrp_slope = PREMIO_DEFAULT.vrp, PREMIO_DEFAULT.vrp_slope
 
+            if scelta == "Predefinito" and not taratura:
+                st.caption(f"Per {_tk} non c'e' una taratura sui prezzi reali: si usa quella "
+                           f"generale. Caricali nella scheda *Calibrazione premio* per "
+                           f"tararla su questo sottostante.")
             st.caption(_anteprima_premio(vrp, vrp_slope, delta_target))
             c3, c4 = st.columns(2)
             with c3:
@@ -1222,8 +1253,57 @@ def scheda_dati(risultato: Dict[str, Any], calibrazione: Optional[Dict[str, Any]
         st.caption(f"{len(blob) / 1024:,.0f} kB — schema {schema}")
 
 
+def _tarature_salvate(ticker: str = "") -> None:
+    """Cosa e' gia' calibrato nell'applicazione, per tutti gli utenti."""
+    salvate = calib.carica_calibrazioni()
+    if not salvate:
+        return
+    tk = calib.normalizza_ticker(ticker)
+    righe = [{"Sottostante": k, "VRP": f"{v.get('vrp'):.3f}",
+              "Osservazioni": v.get("osservazioni"),
+              "Periodo": f"{v.get('dal', '')} → {v.get('al', '')}".strip(" →"),
+              "Errore medio": (f"{v['mae'] * 100:.2f} pt" if v.get("mae") is not None else "—"),
+              "Calibrata il": v.get("calibrato_il", "")}
+             for k, v in salvate.items()]
+    with st.expander(f"Tarature gia' salvate nell'applicazione ({len(righe)})",
+                     expanded=tk not in salvate):
+        st.caption("Viaggiano col codice, quindi valgono per chiunque usi la dashboard: "
+                   "su questi sottostanti il premio non e' stimato da un modello generico "
+                   "ma tarato sui prezzi veri delle opzioni. Si applicano da sole quando "
+                   "scegli quel ticker.")
+        st.dataframe(pd.DataFrame(righe), hide_index=True, **LARGO)
+
+
+def _salva_taratura(params: Dict[str, Any]) -> None:
+    """Il file da rimettere nel repository perche' la taratura valga per tutti."""
+    riga = st.session_state.get("riga_calibrazione")
+    if not riga:
+        return
+    st.markdown("#### Rendere questa taratura valida per tutti")
+    nota(
+        "L'applicazione non puo' salvare da sola: su Streamlit Cloud il disco torna "
+        "com'era nel repository a ogni riavvio. Scarica qui sotto il file completo — "
+        "contiene le tarature gia' presenti <b>piu' questa</b> — e sostituisci con esso "
+        "<code>kq_btd_cc/calibrazioni.json</code> nel repository. Al primo riavvio "
+        f"<b>{riga['ticker']}</b> risultera' calibrato per chiunque apra la dashboard."
+    )
+    completo = calib.unisci_calibrazioni(riga)
+    blob = json.dumps(completo, ensure_ascii=False, indent=2).encode("utf-8")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.download_button("Scarica calibrazioni.json", data=blob,
+                           file_name="calibrazioni.json", mime="application/json",
+                           type="primary", **LARGO)
+    with c2:
+        st.caption(f"{len(completo.get('calibrazioni', {}))} sottostanti nel file: "
+                   + ", ".join(completo.get("calibrazioni", {})))
+    with st.expander("La riga che verrebbe aggiunta", expanded=False):
+        st.json(riga)
+
+
 def scheda_calibrazione(risultato: Optional[Dict[str, Any]], params: Dict[str, Any]) -> None:
     st.markdown("#### Calibrazione del premio sui prezzi reali")
+    _tarature_salvate(str(params.get("ticker", "")))
     nota(
         "Carica un file con i prezzi reali delle call vicine al delta obiettivo sul "
         "sottostante che stai studiando. Per ogni riga il modello ricostruisce il premio "
@@ -1319,6 +1399,10 @@ def scheda_calibrazione(risultato: Optional[Dict[str, Any]], params: Dict[str, A
         st.session_state["fit_osservazioni"] = oss
         st.session_state["calibrazione"] = calib.pacchetto_export(
             fit, nome_file=file.name, ticker=str(params.get("ticker", "")))
+        # La riga pronta da salvare nel repository, con dentro il ticker.
+        st.session_state["riga_calibrazione"] = calib.riga_calibrazione(
+            fit, params.get("ticker", ""), nome_file=file.name,
+            obiettivo=obiettivo, oss=oss)
 
     fit = st.session_state.get("fit_calibrazione")
     if not fit:
@@ -1367,15 +1451,18 @@ def scheda_calibrazione(risultato: Optional[Dict[str, Any]], params: Dict[str, A
 
     sigma_med = float(oss["sigma_realizzata"].median()) if oss is not None else None
     st.success(
-        "**Calibrazione pronta.** Nella sidebar, sotto *Premio della call*, scegli "
-        "**Calibrato sui prezzi reali** e rilancia il backtest: i parametri vengono presi "
-        "da qui, non c'e' niente da ricopiare a mano. La calibrazione finisce anche nel JSON "
-        "di export."
+        "**Calibrazione pronta.** La sidebar la sta gia' usando per questo sottostante: "
+        "rilancia il backtest e i parametri vengono presi da qui, senza toccare niente. "
+        "La calibrazione finisce anche nel JSON di export."
         + (f" Alla volatilita mediana di questo sottostante ({sigma_med:.0%}) il rapporto "
            f"applicato e' {fit['modello'].vrp_effettivo(sigma_med):.3f}." if sigma_med else "")
     )
     st.caption(_anteprima_premio(fit["modello"].vrp, fit["modello"].vrp_slope,
                                  fit["modello"].target_delta))
+
+    # Finche' resta solo in sessione vale per chi l'ha caricata; qui si ottiene il
+    # file da rimettere nel repository perche' valga per tutti.
+    _salva_taratura(params)
 
 
 # ---------------------------------------------------------------------------
