@@ -149,6 +149,74 @@ CSS = f"""
   div[data-testid="stMetricValue"] {{ font-family: {FONT_MONO}; }}
   .stTabs [data-baseweb="tab-list"] {{ gap: 4px; }}
   .stTabs [data-baseweb="tab"] {{ border-radius: 8px 8px 0 0; padding: 8px 16px; }}
+
+  /* La sidebar contiene TUTTI i comandi: se un utente alle prime armi la chiude
+     per sbaglio non ritrova piu' nulla e pensa che l'app sia rotta.
+     Su schermo largo si toglie il pulsante che la CHIUDE, cosi' non puo'
+     sparire. Il pulsante che la RIAPRE invece non si tocca mai, anzi lo si
+     rende piu' visibile: se per qualunque motivo la sidebar risultasse chiusa
+     (schermo stretto, poi allargato) nasconderlo lascerebbe l'utente in
+     trappola, che e' proprio il problema che si vuole evitare.
+     Sotto i 768px il comportamento resta quello normale di Streamlit, perche'
+     su telefono una sidebar fissa coprirebbe la pagina. */
+  @media (min-width: 768px) {{
+    [data-testid="stSidebarCollapseButton"] {{ display: none !important; }}
+  }}
+  [data-testid="stSidebarCollapsedControl"] {{
+    background: {PALETTE['premi_cash']} !important;
+    border-radius: 8px;
+  }}
+  [data-testid="stSidebarCollapsedControl"] svg {{ fill: {PALETTE['bg']} !important; }}
+
+  /* Marchio e link, in cima alla sidebar: sono sempre sotto gli occhi perche'
+     la sidebar non si puo' chiudere. */
+  .kq-brand {{
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 12px; margin-bottom: 14px;
+    background: {PALETTE['surface_alt']};
+    border: 1px solid rgba(148,163,184,0.18); border-radius: 10px;
+  }}
+  .kq-brand .kq-nome {{
+    font-weight: 700; font-size: 0.95rem; color: {PALETTE['text']};
+    letter-spacing: 0.02em; width: 100%;
+  }}
+  .kq-brand a {{
+    font-size: 0.8rem; text-decoration: none; padding: 3px 10px;
+    border-radius: 999px; border: 1px solid rgba(148,163,184,0.3);
+    color: {PALETTE['premi_cash']} !important;
+  }}
+  .kq-brand a:hover {{
+    background: {PALETTE['premi_cash']}; color: {PALETTE['bg']} !important;
+    border-color: {PALETTE['premi_cash']};
+  }}
+
+  /* Piede di pagina: sta fuori dal contenitore delle schede, quindi resta
+     visibile qualunque scheda sia aperta. */
+  .kq-footer {{
+    margin-top: 2.2rem; padding: 16px 18px;
+    background: {PALETTE['surface']};
+    border: 1px solid rgba(148,163,184,0.16);
+    border-left: 3px solid {PALETTE['strike']};
+    border-radius: 10px;
+  }}
+  .kq-footer .kq-titolo {{
+    margin: 0 0 8px 0; font-size: 0.82rem; letter-spacing: 0.08em;
+    text-transform: uppercase; color: {PALETTE['strike']};
+  }}
+  .kq-footer p {{
+    margin: 0 0 8px 0; font-size: 0.79rem; line-height: 1.55;
+    color: {PALETTE['text_muted']};
+  }}
+  .kq-footer .kq-link {{
+    margin-top: 12px; padding-top: 12px;
+    border-top: 1px solid rgba(148,163,184,0.16);
+    font-size: 0.82rem; color: {PALETTE['text_muted']};
+  }}
+  .kq-footer .kq-link a {{
+    color: {PALETTE['premi_cash']} !important; text-decoration: none;
+    font-weight: 600;
+  }}
+  .kq-footer .kq-link a:hover {{ text-decoration: underline; }}
 </style>
 """
 
