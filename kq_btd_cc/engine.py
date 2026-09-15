@@ -28,6 +28,11 @@ Modello (una riga = un periodo, mese o settimana):
     all'intrinseco con le quote invariate: non e' una scorciatoia, e' la
     stessa aritmetica. E' qui che si paga il cap sull'upside, e il costo si
     accumula davvero.
+  * Quando il regolamento della call supera la cassa il saldo va sotto zero.
+    `fonte_liquidita` dice cosa vuol dire quel segno meno: con "riserva" (il
+    predefinito) e' riserva gia' allocata a inizio anno che viene assorbita, e
+    non costa niente; con "debito" e' un finanziamento del broker, e paga
+    `debit_cash_rate`.
   * Quando il sottostante ha un periodo negativo scatta il Buy-The-Dip: si
     acquista |rendimento del periodo precedente| * capitale_iniziale, piu' il
     BOOST, una percentuale fissa del capitale iniziale che si aggiunge a ogni
@@ -242,7 +247,8 @@ class BacktestConfig:
     # Mercato
     premium_model: PremiumModel = field(default_factory=PremiumModel)
     idle_cash_rate: float = 0.0                # remunerazione della cassa non impiegata
-    debit_cash_rate: float = 0.06              # costo del saldo a debito (vedi sotto)
+    fonte_liquidita: str = "riserva"           # "riserva" | "debito" (vedi sotto)
+    debit_cash_rate: float = 0.06              # costo del saldo a debito, se "debito"
     var_confidence: float = 0.99
 
     @property
@@ -429,6 +435,9 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
     # cadenza mensile, cinquantaduesimi su quella settimanale.
     idle_m = float(cfg.idle_cash_rate) / ppa
     debito_m = float(cfg.debit_cash_rate) / ppa
+    # Come si copre il fabbisogno di cassa quando il regolamento della call
+    # supera la liquidita' disponibile. Vedi il blocco "Fabbisogno di cassa".
+    usa_riserva = str(getattr(cfg, "fonte_liquidita", "riserva")) != "debito"
 
     # Stato del conto
     cassa = 0.0            # liquidita' operativa: capitale, liquidazioni, BTD
@@ -522,14 +531,31 @@ def run_variant(market: Dict[str, Any], cfg: BacktestConfig, variant: str) -> Di
             costo_posizione = capitale_annuo
             anno_corrente = data.year
 
-        # Interessi sulla liquidita'. Il saldo puo' andare a debito quando il
-        # regolamento della call a intrinseco supera la cassa disponibile: e' un
-        # finanziamento garantito dalle azioni in portafoglio, e come tale costa.
+        # Interessi sulla liquidita'.
+        #
+        # Il saldo puo' diventare negativo quando il regolamento della call
+        # supera la cassa disponibile. Cosa significhi quel segno meno dipende da
+        # come si e' impostato il conto, e sono due situazioni davvero diverse:
+        #
+        #   "riserva"  la strategia chiede di allocare a inizio anno molto piu'
+        #              del capitale iniziale (sul mensile il doppio: vedi
+        #              `capitale_max_impiegato`). Se quella riserva c'e', il
+        #              regolamento si paga con quella e NON si deve niente a
+        #              nessuno: il saldo negativo misura quanta riserva e' stata
+        #              assorbita, non un debito. E' il comportamento predefinito,
+        #              l'unico coerente con le istruzioni d'uso della strategia.
+        #   "debito"   chi tiene sul conto solo il minimo si fa finanziare dal
+        #              broker contro le azioni in portafoglio, e paga il tasso.
+        #
+        # Non si inietta denaro nel conto: farlo alzerebbe il valore del
+        # portafoglio senza che `risultato_anno` lo riconosca come versamento, e
+        # il rendimento dell'anno risulterebbe gonfiato. Il saldo resta com'e',
+        # cambia solo chi ne paga il costo.
         totale_liquido = cassa + cassa_opzioni
         interessi = 0.0
         if totale_liquido > 0 and idle_m:
             interessi = totale_liquido * idle_m
-        elif totale_liquido < 0 and debito_m:
+        elif totale_liquido < 0 and debito_m and not usa_riserva:
             interessi = totale_liquido * debito_m
         cassa += interessi
 
