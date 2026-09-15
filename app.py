@@ -366,7 +366,7 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                      "sul saldo, o quello di un monetario se ce la parcheggi.") / 100.0
             debito = st.slider(
                 "Costo del saldo a debito (annuo)", 0.0, 15.0, 6.0, 0.5,
-                help="Quando il riacquisto della call a scadenza supera la liquidita' "
+                help="Quando il regolamento della call a scadenza supera la liquidita' "
                      "disponibile, il conto va a debito contro le azioni in portafoglio. "
                      "Questo e' il tasso applicato a quel finanziamento.") / 100.0
 
@@ -511,8 +511,11 @@ def sidebar() -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
                      "e' alta la volatilita'.")
             applica_cap = st.checkbox(
                 "Applica il cap della covered call", value=True,
-                help="A scadenza la call in-the-money viene riacquistata al valore "
-                     "intrinseco. Disattivandolo si incassano i premi senza pagarne il "
+                help="La call si porta a scadenza: se finisce in-the-money il costo e' "
+                     "il valore intrinseco, regolato in contanti sugli indici oppure "
+                     "consegnando e ricomprando il sottostante dove c'e' assegnazione. "
+                     "Le due strade costano lo stesso, ed e' quello che il motore "
+                     "contabilizza. Disattivandolo si incassano i premi senza pagarne il "
                      "costo, ed e' esattamente il difetto della versione precedente.")
 
         with st.expander("Stima della volatilita", expanded=False):
@@ -878,7 +881,7 @@ def scheda_opzione(risultato: Dict[str, Any], figure: Dict[str, Any]) -> None:
     finanziamento = cash.get("finanziamento_massimo") or 0.0
     if finanziamento > 0.05 * float(cfg.get("capitale_iniziale", 1)):
         st.warning(
-            f"Il riacquisto delle call in-the-money ha portato il conto a debito fino a "
+            f"Il regolamento delle call in-the-money ha portato il conto a debito fino a "
             + A(f"{fmt_currency_compact(finanziamento)} per "
                 f"{cash.get('mesi_a_debito', 0)} mesi ") +
             f"({fmt_pct(finanziamento / float(cfg.get('capitale_iniziale', 1)), 0)} del capitale "
@@ -1515,8 +1518,10 @@ if risultato is None:
 Ogni anno si impiega lo **stesso capitale fisso**, deciso in partenza, comprando il
 sottostante all'apertura di gennaio. Su quelle quote si vende ogni mese una call a
 delta 0.50 con scadenza a fine mese: si incassa un premio pari a una percentuale del
-prezzo corrente e, se a scadenza la call e' in-the-money, la si riacquista al valore
-intrinseco. E' cosi' che il cap sull'upside costa davvero, mese dopo mese.
+prezzo corrente e la si porta a scadenza. Se finisce in-the-money si paga il **valore
+intrinseco**: in contanti sugli indici, oppure consegnando le quote allo strike e
+ricomprandole al prezzo di mercato dove c'e' assegnazione — il costo e' identico. E'
+cosi' che il cap sull'upside costa davvero, mese dopo mese.
 
 Quando il sottostante chiude un mese in negativo scatta il **Buy-The-Dip**: si investe
 l'entita' del calo applicata al capitale fisso, maggiorata di un boost, fino a un tetto
